@@ -1,42 +1,32 @@
 """
 model.py — O modelo GPT do zero
 
-Este é o arquivo mais importante do projeto. Implementamos cada
-componente do Transformer na mão, sem usar nn.Transformer do PyTorch.
+Implementamos cada componente do Transformer na mão, sem usar
+nn.Transformer do PyTorch.
 
-A ARQUITETURA GPT (de baixo pra cima):
+NOVIDADES:
+- RoPE (Rotary Position Embedding): codifica posição via rotação
+  nos vetores Q e K ao invés de soma de embeddings. Generaliza
+  melhor para sequências longas.
+- Flash Attention: usa F.scaled_dot_product_attention do PyTorch
+  2.0+ para atenção ~2-4x mais rápida (automático em CUDA).
 
-1. Token Embedding + Position Embedding
-   Converte tokens (inteiros) em vetores densos e adiciona
-   informação posicional (posição do token na sequência).
+ARQUITETURA GPT (de baixo pra cima):
 
+1. Token Embedding (+ Position Embedding se não usar RoPE)
 2. N× TransformerBlock (empilhados)
-   Cada bloco contém:
-   ├── LayerNorm
-   ├── MultiHeadSelfAttention  ← "o mecanismo que faz o modelo olhar
-   │     (com residual)           pra todos os tokens anteriores")
-   ├── LayerNorm
-   └── FeedForward              ← "processa cada token individualmente"
-         (com residual)
-
+    ├── LayerNorm
+    ├── MultiHeadSelfAttention (com RoPE + Flash Attention)
+    │     (com residual)
+    ├── LayerNorm
+    └── FeedForward (com residual)
 3. LayerNorm final + Linear head
-   Projeta de volta pro vocabulário para prever o próximo token.
-
-POR QUE ESSA ORDEM (Pre-Norm)?
-O artigo original do Transformer usava Post-Norm (normalização depois
-da atenção). Mas GPT-2 em diante usa Pre-Norm (normalização ANTES).
-Isso estabiliza o treinamento em redes profundas.
-
-A INTUIÇÃO DO TRANSFORMER:
-- Self-Attention: "Dado o contexto, quão relevante é cada token
-  anterior pra prever o próximo?"
-- Feed-Forward: "Processa o que a atenção juntou e transforma."
-- Residual: "Não perde informação anterior, soma em cima."
-- LayerNorm: "Normaliza pra não explodir/desaparecer os gradientes."
 
 REFERÊNCIAS:
 - "Attention Is All You Need" (Vaswani et al., 2017)
-- GPT-2: "Language Models are Unsupervised Multitask Learners" (Radford et al., 2019)
+- GPT-2 (Radford et al., 2019)
+- RoFormer: "Rotary Position Embedding" (Su et al., 2021)
+- Flash Attention: "Fast and Memory-Efficient Exact Attention" (Dao et al., 2022)
 - nanoGPT de Karpathy: https://github.com/karpathy/nanoGPT
 """
 
@@ -48,18 +38,85 @@ import torch.nn.functional as F
 from config import GPTConfig
 
 
+# ──────────────────────────────────────────────────────────
+# Rotary Position Embedding (RoPE)
+# ──────────────────────────────────────────────────────────
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotaciona metade das dimensões: [-x2, x1] a partir de [x1, x2]."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat([-x2, x1], dim=-1)
+
+
+class RotaryEmbedding(nn.Module):
+    """
+    Rotary Position Embedding (RoPE).
+
+    AO INVÉS de somar um embedding posicional ao input, RoPE aplica
+    uma rotação aos vetores Q e K proporcional à posição.
+
+    INTUIÇÃO: tokens em posições próximas têm ângulos de rotação
+    próximos → produto escalar (atenção) é maior. Tokens distantes
+    têm rotações diferentes → atenção naturalmente decai com distância.
+
+    MATEMÁTICA:
+    Para posição pos e dimensão i:
+      θ_i = 1 / (10000^(2i/d))
+      q_rot = q * cos(pos·θ) + rotate_half(q) * sin(pos·θ)
+
+    VANTAGEM sobre embedding aprendido:
+    - Extrapola para sequências mais longas que o treino
+    - Codifica distância relativa entre tokens (não absoluta)
+    """
+
+    def __init__(self, dim: int, max_seq_len: int = 2048):
+        super().__init__()
+        # Frequências inversas: 1 / (10000^(2i/d))
+        inv_freq = 1.0 / (
+            10000
+            ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        )
+        self.register_buffer("inv_freq", inv_freq)
+        self._build_cache(max_seq_len)
+
+    def _build_cache(self, seq_len: int) -> None:
+        """Pré-computa cos/sin para todas as posições até seq_len."""
+        t = torch.arange(seq_len, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)  # (seq_len, dim/2)
+        emb = torch.cat([freqs, freqs], dim=-1)  # (seq_len, dim)
+        self.register_buffer("cos_cached", emb.cos())
+        self.register_buffer("sin_cached", emb.sin())
+
+    def forward(
+        self, x: torch.Tensor, offset: int = 0
+    ) -> torch.Tensor:
+        """
+        Aplica rotação posicional a x.
+
+        Args:
+            x: tensor de shape (..., seq_len, dim)
+            offset: deslocamento de posição (útil para KV-cache)
+        """
+        seq_len = x.shape[-2]
+        cos = self.cos_cached[offset : offset + seq_len]  # (seq_len, dim)
+        sin = self.sin_cached[offset : offset + seq_len]
+        # Broadcast para (1, 1, seq_len, dim) se necessário
+        while cos.dim() < x.dim():
+            cos = cos.unsqueeze(0)
+            sin = sin.unsqueeze(0)
+        return x * cos + _rotate_half(x) * sin
+
+
+# ──────────────────────────────────────────────────────────
+# Componentes básicos
+# ──────────────────────────────────────────────────────────
+
 class LayerNorm(nn.Module):
     """
     Layer Normalization — normaliza pra média 0 e variância 1.
 
-    Diferente do BatchNorm (que normaliza pelo batch), o LayerNorm
-    normaliza CADA token individualmente pelas suas features.
-
     Fórmula: y = (x - μ) / sqrt(σ² + ε) * γ + β
-    onde γ (gain) e β (bias) são parâmetros aprendíveis.
-
-    PQ PRE-SCALED? Usamos 1+γ ao invés de γ direto pra inicialização
-    ficar próxima de identidade no começo do treino.
     """
 
     def __init__(self, d_model: int, eps: float = 1e-5):
@@ -79,26 +136,10 @@ class MultiHeadSelfAttention(nn.Module):
     """
     Multi-Head Self-Attention — o coração do Transformer.
 
-    A IDEIA:
-    Em vez de olhar pra todos os tokens anteriores com uma única
-    "lente", usamos múltiplas cabeças (heads), cada uma aprendendo
-    um tipo diferente de relação.
-
-    EXEMPLO PRÁTICO:
-    Na frase "O gato comeu o peixe", diferentes cabeças podem aprender:
-    - Head 1: relação sujeito→verbo ("gato"→"comeu")
-    - Head 2: relação artigo→substantivo ("o"→"peixe")
-    - Head 3: relação temporal, etc.
-
-    MATEMÁTICA:
-    1. Projetamos input em Q (query), K (key), V (value)
-    2. Attention(Q,K,V) = softmax(Q·K^T / √d_k) · V
-    3. A máscara causal garante que só olhamos pra trás
-
-    A MÁSCARA CAUSAL:
-    - Tokens SÓ podem olhar pra tokens anteriores
-    - Isso torna o modelo autoregressivo (gera um token de cada vez)
-    - Implementamos com uma matriz triangular superior de -inf
+    NOVIDADES:
+    - RoPE: rotação posicional aplicada a Q e K antes da atenção
+    - Flash Attention: F.scaled_dot_product_attention quando disponível
+      (PyTorch 2.0+), que usa memória O(N) ao invés de O(N²).
     """
 
     def __init__(self, config: GPTConfig):
@@ -108,48 +149,66 @@ class MultiHeadSelfAttention(nn.Module):
         self.n_heads = config.n_heads
         self.head_dim = config.head_dim
         self.d_model = config.d_model
+        self.use_rope = config.use_rope
 
-        # Projeções lineares: input → Q, K, V
-        # Fazemos TUDO numa matriz grande e depois splittamos
         self.W_qkv = nn.Linear(config.d_model, 3 * config.d_model)
-        # Projeção de saída: concat(heads) → output
         self.W_out = nn.Linear(config.d_model, config.d_model)
 
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
+        # RoPE (uma instância por bloco de atenção)
+        if config.use_rope:
+            self.rotary_emb = RotaryEmbedding(config.head_dim, config.context_len)
+        else:
+            self.rotary_emb = None
+
+        # Flag para usar Flash Attention
+        self._use_flash = hasattr(F, "scaled_dot_product_attention")
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # batch, seq_len, d_model
+        B, T, C = x.shape
 
-        # 1. Projetar pra Q, K, V e dividir entre as cabeças
-        qkv = self.W_qkv(x)  # (B, T, 3*C)
-        q, k, v = qkv.chunk(3, dim=-1)  # cada um: (B, T, C)
+        # Projetar pra Q, K, V
+        qkv = self.W_qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
 
-        # Reshape: (B, T, C) → (B, T, n_heads, head_dim) → (B, n_heads, T, head_dim)
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # 2. Calcular scores de atenção
-        # Q·K^T / √d_k — o √d_k evita que softmax sature
-        attn_scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # Aplicar RoPE a Q e K (ANTES da atenção)
+        if self.use_rope and self.rotary_emb is not None:
+            q = self.rotary_emb(q)
+            k = self.rotary_emb(k)
 
-        # 3. Máscara causal: -inf na parte superior direita
-        # Só permitimos olhar pra trás (tokens anteriores)
-        mascara_causal = torch.triu(
-            torch.ones(T, T, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
-        attn_scores = attn_scores.masked_fill(mascara_causal, float("-inf"))
+        # Atenção
+        if self._use_flash:
+            # Flash Attention: O(N) em memória, automático em CUDA
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                is_causal=True,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+            )
+        else:
+            # Fallback: atenção manual (CPU ou PyTorch < 2.0)
+            attn_scores = (q @ k.transpose(-2, -1)) / math.sqrt(
+                self.head_dim
+            )
+            mascara_causal = torch.triu(
+                torch.ones(T, T, device=x.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            attn_scores = attn_scores.masked_fill(
+                mascara_causal, float("-inf")
+            )
+            attn_probs = F.softmax(attn_scores, dim=-1)
+            attn_probs = self.attn_dropout(attn_probs)
+            out = attn_probs @ v
 
-        # 4. Softmax: converte scores em probabilidades
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.attn_dropout(attn_probs)
-
-        # 5. Multiplicar por V: média ponderada dos valores
-        out = attn_probs @ v  # (B, n_heads, T, head_dim)
-
-        # 6. Concatenar as cabeças e projetar
+        # Concatenar cabeças e projetar
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         out = self.W_out(out)
         out = self.resid_dropout(out)
@@ -161,15 +220,7 @@ class FeedForward(nn.Module):
     """
     Feed-Forward Network — processa cada token individualmente.
 
-    ARQUITETURA:
     input → Linear(d_model, 4*d_model) → GELU → Linear(4*d_model, d_model) → output
-    
-    PQ 4x? O GPT-2 usa 4x a dimensão internamente. Isso dá mais
-    capacidade pro modelo aprender relações não-lineares.
-    
-    PQ GELU e não ReLU? GELU (Gaussian Error Linear Unit) é mais suave
-    e funciona melhor em transformers. GELU(0) ≈ 0.5, ReLU(0) = 0.
-    Essa suavidade evita "neurônios mortos".
     """
 
     def __init__(self, config: GPTConfig):
@@ -187,17 +238,11 @@ class FeedForward(nn.Module):
 
 class TransformerBlock(nn.Module):
     """
-    Bloco Transformer — a unidade básica que empilhamos.
+    Bloco Transformer (Pre-Norm):
 
-    ESTRUTURA (Pre-Norm):
-        x ──→ LayerNorm → Attention → (+) ──→ LayerNorm → FFN → (+) ──→ saída
-        |                                       |                      |
-        └─────── residual ──────────────────────┘──────────────────────┘
-
-    AS CONEXÕES RESIDUAIS (skip connections) são CRUCIAIS:
-    - Permitem que gradientes fluam diretamente pelo caminho curto
-    - O modelo pode escolher "ignorar" transformações se necessário
-    - Sem elas, redes profundas são intrainteríveis (vanishing gradients)
+    x → LayerNorm → Attention → (+) → LayerNorm → FFN → (+) → saída
+    |                               |                          |
+    └──── residual ─────────────────┘──────────────────────────┘
     """
 
     def __init__(self, config: GPTConfig):
@@ -208,9 +253,7 @@ class TransformerBlock(nn.Module):
         self.ffn = FeedForward(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Atenção com conexão residual
         x = x + self.attn(self.ln1(x))
-        # FFN com conexão residual
         x = x + self.ffn(self.ln2(x))
         return x
 
@@ -219,67 +262,46 @@ class GPTModel(nn.Module):
     """
     GPT — Generative Pre-trained Transformer.
 
-    O MODELO COMPLETO, de ponta a ponta:
-    
-    tokens (inteiros)
-      → Token Embedding (lookup table: token → vetor denso)
-      + Position Embedding (informa a posição de cada token)
-      → Dropout
-      → N× TransformerBlock
-      → LayerNorm final
-      → Linear head (projeta de volta pro vocabulário)
-      → logits (probabilidades não-normalizadas do próximo token)
+    MODELO COMPLETO:
+    tokens → Token Embedding
+           + Position Embedding (se NÃO usar RoPE)
+           → Dropout → N× TransformerBlock → LayerNorm → Linear head → logits
 
-    TREINAMENTO:
-    Dado um batch de sequências como [t0, t1, t2, ..., tn],
-    o modelo prevê [t1, t2, t3, ..., tn+1].
-    Ou seja: o input é a sequência inteira, o target é a mesma
-    sequência deslocada 1 posição pra direita.
-    
-    ISSO É SUPER EFICIENTE porque processamos TODOS os pares
-    input→target em paralelo numa única passada forward!
+    NOVIDADES:
+    - RoPE: se use_rope=True, NÃO usa position_embedding
+    - ignore_index=-100 no cross_entropy: suporta SFT (mascarar instrução)
     """
 
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
 
-        # Embeddings: convertem tokens (inteiros) em vetores densos
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
-        # Position embedding: aprende uma representação pra cada posição
-        self.position_embedding = nn.Embedding(config.context_len, config.d_model)
+
+        if config.use_rope:
+            # RoPE: posição codificada na atenção, não via embedding
+            self.position_embedding = None
+        else:
+            self.position_embedding = nn.Embedding(
+                config.context_len, config.d_model
+            )
 
         self.drop = nn.Dropout(config.dropout)
-
-        # Os blocos Transformer empilhados
         self.blocks = nn.Sequential(
             *[TransformerBlock(config) for _ in range(config.n_layers)]
         )
-
-        # Normalização final
         self.ln_f = LayerNorm(config.d_model)
+        self.lm_head = nn.Linear(
+            config.d_model, config.vocab_size, bias=False
+        )
 
-        # Cabeça de classificação: projeta embeddings de volta pro vocabulário
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-
-        # Compartilhar pesos entre token_embedding e lm_head
-        # Isso é chamado "weight tying" e reduz o número de parâmetros
+        # Weight tying: compartilha pesos entre embedding e classificação
         self.lm_head.weight = self.token_embedding.weight
 
-        # Inicialização dos pesos (seguindo GPT-2)
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """
-        Inicialização dos pesos seguindo o paper do GPT-2.
-        
-        Linear layers: Normal(0, 0.02)
-        Embeddings: Normal(0, 0.02)
-        Bias: zero
-        
-        Camadas residuais: ganho extra pequeno (0.02 / sqrt(2*n_layers))
-        Isso compensa o acúmulo residual ao longo das camadas.
-        """
+        """Inicialização GPT-2: Normal(0, 0.02), camadas residuais com ganho menor."""
         n_layers = self.config.n_layers
         for nome, modulo in self.named_modules():
             if isinstance(modulo, nn.Linear):
@@ -289,7 +311,6 @@ class GPTModel(nn.Module):
             elif isinstance(modulo, nn.Embedding):
                 nn.init.normal_(modulo.weight, mean=0.0, std=0.02)
 
-            # Ganho extra pra camadas residuais — estabiliza treino profundo
             if nome.endswith(("ffn.net.0", "W_qkv", "W_out")):
                 nn.init.normal_(
                     modulo.weight,
@@ -303,51 +324,53 @@ class GPTModel(nn.Module):
         targets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
-        Forward pass do modelo.
+        Forward pass.
 
         Args:
-            idx: tensor de IDs de tokens, shape (B, T)
-                B = batch_size, T = comprimento da sequência
-            targets: IDs esperados, shape (B, T)
-                Se fornecido, calcula a cross-entropy loss.
-
-        Returns:
-            logits: (B, T, vocab_size) — scores para cada token do vocab
-            loss: escalar, ou None se targets não fornecido
+            idx: IDs de tokens, shape (B, T)
+            targets: IDs esperados, shape (B, T).
+                     Posições com -100 são ignoradas (SFT masking).
         """
         B, T = idx.shape
-
-        # Posição: [0, 1, 2, ..., T-1]
-        pos = torch.arange(0, T, device=idx.device).unsqueeze(0)  # (1, T)
-
-        # Embeddings
         tok_emb = self.token_embedding(idx)  # (B, T, d_model)
-        pos_emb = self.position_embedding(pos)  # (1, T, d_model)
-        x = self.drop(tok_emb + pos_emb)  # broadcasting: (B, T, d_model)
 
-        # Passar pelos blocos Transformer
-        x = self.blocks(x)  # (B, T, d_model)
-        x = self.ln_f(x)  # (B, T, d_model)
+        if self.position_embedding is not None:
+            pos = torch.arange(0, T, device=idx.device).unsqueeze(0)
+            x = self.drop(tok_emb + self.position_embedding(pos))
+        else:
+            x = self.drop(tok_emb)
 
-        # Projetar pro vocabulário
+        x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
-        # Calcular loss se targets fornecidos
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
+                ignore_index=-100,
             )
 
         return logits, loss
 
+    def get_log_probs(
+        self, idx: torch.Tensor, targets: torch.Tensor
+    ) -> torch.Tensor:
+        """Retorna log-probabilidades por token (usado no DPO)."""
+        logits, _ = self.forward(idx)
+        log_probs = F.log_softmax(logits, dim=-1)
+        token_log_probs = log_probs.gather(
+            2, targets.unsqueeze(-1)
+        ).squeeze(-1)
+        # Máscara: ignorar -100
+        mask = targets != -100
+        return (token_log_probs * mask).sum(dim=-1)
+
     def contar_parametros(self) -> int:
-        """Retorna o número total de parâmetros treináveis."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def resumo(self) -> str:
-        """Retorna um resumo legível do modelo."""
         n = self.contar_parametros()
         c = self.config
         lines = [
@@ -361,6 +384,8 @@ class GPTModel(nn.Module):
             f"  context_len:    {c.context_len}",
             f"  dropout:        {c.dropout}",
             f"  FFN dim:        {4 * c.d_model}",
+            f"  RoPE:           {'Sim' if c.use_rope else 'Não'}",
+            f"  Flash Attn:     {'Disponível' if hasattr(F, 'scaled_dot_product_attention') else 'Não disponível'}",
             f"════════════════════════════════════════════════════════════",
         ]
         return "\n".join(lines)
