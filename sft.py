@@ -91,6 +91,28 @@ class SFTDataset(Dataset):
         )
 
 
+def _sft_collate(
+    batch: list[tuple[torch.Tensor, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad SFT batches to equal length (shortest power-of-2 that fits)."""
+    max_len = max(x.size(0) for x, _ in batch)
+    # Arredonda para a próxima potência de 2 (mais eficiente na GPU)
+    padded_len = 1
+    while padded_len < max_len:
+        padded_len *= 2
+
+    input_ids_list, targets_list = [], []
+    for x, y in batch:
+        pad_len = padded_len - x.size(0)
+        input_ids_list.append(
+            torch.cat([x, torch.zeros(pad_len, dtype=torch.long)])
+        )
+        targets_list.append(
+            torch.cat([y, torch.full((pad_len,), IGNORE_INDEX, dtype=torch.long)])
+        )
+    return torch.stack(input_ids_list), torch.stack(targets_list)
+
+
 def treinar_sft(
     modelo: GPTModel,
     tokenizer: CharTokenizer | BPETokenizer,
@@ -140,6 +162,7 @@ def treinar_sft(
         shuffle=True,
         num_workers=0,
         pin_memory=device != "cpu",
+        collate_fn=_sft_collate,
     )
     print(f"  Amostras SFT válidas: {len(dataset)}")
     print(f"  Batches por época: {len(dataloader)}")

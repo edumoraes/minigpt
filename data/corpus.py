@@ -25,6 +25,14 @@ def gerar_corpus() -> str:
         "o menino", "a menina", "o professor", "a professora", "o artista",
         "a cozinheira", "o cientista", "a médica", "o engenheiro", "a escritora",
         "o músico", "a rainha", "o rei", "a bailarina", "o pescador",
+        "o peixe", "a borboleta", "o urso", "a águia", "o golfinho",
+        "a formiga", "o coelho", "a tartaruga", "o leão", "a zebra",
+        "o médico", "a enfermeira", "o piloto", "a jornalista", "o agricultor",
+        "a advogada", "o arquiteto", "a dentista", "o bombeiro", "a policial",
+        "o carteiro", "a psicóloga", "o mecânico", "a veterinária", "o padeiro",
+        "a florista", "o rio", "a montanha", "o mar", "a nuvem",
+        "o vento", "a chuva", "o sol", "a lua", "a estrela",
+        "a flor", "a árvore", "a pedra", "o lago", "a ilha",
     ]
 
     verbos = [
@@ -32,45 +40,155 @@ def gerar_corpus() -> str:
         "brincava", "estudava", "trabalhava", "cantava", "dançava",
         "falava", "ouvia", "via", "pensava", "sonhava",
         "escrevia", "lia", "pintava", "cozinhava", "navegava",
+        "correu", "pulou", "voou", "nadou", "cantou", "dançou",
+        "escreveu", "leu", "pintou", "cozinhou", "navegou", "construiu",
+        "descobriu", "ensinou", "aprendeu", "cresceu", "brilhou", "sorriu",
+        "chorou", "dormiu", "acordou", "caminhou", "encontrou", "perdeu",
+        "ganhou", "amou", "sonhou", "corre", "pula", "voa",
+        "nada", "canta", "dança", "escreve", "lê", "pinta",
+        "cozinha", "navega", "constrói", "descobre", "ensina", "aprende",
+        "cresce", "brilha", "sorri", "chora", "dorme", "acorda",
+        "caminha", "encontra", "perde", "ganha", "ama", "sonha",
+        "correrá", "pulará", "voará", "nadará", "cantará", "dançará",
+        "escreverá", "lerá", "pintará", "cozinhará", "navegará", "construirá",
+        "descobrirá", "ensinará", "aprenderá", "crescerá", "brilhará", "sorrirá",
     ]
 
     objetos = [
         "na praça", "no parque", "na casa", "na escola", "no jardim",
         "na rua", "na praia", "no rio", "na montanha", "na cidade",
         "na floresta", "no campo", "na biblioteca", "no teatro", "na cozinha",
+        "no mercado", "na feira", "no hospital", "na igreja", "no estádio",
+        "no museu", "no cinema", "no restaurante", "na padaria", "na farmácia",
+        "no escritório", "na universidade", "no aeroporto", "na estação", "no porto",
+        "na fazenda", "no acampamento", "na caverna", "no deserto", "na neve",
     ]
 
     complementos = [
         "com alegria", "com cuidado", "com calma", "com atenção",
         "com amor", "com paciência", "com vontade", "sem pressa",
         "com determinação", "com entusiasmo", "com gratidão", "com coragem",
+        "com sabedoria", "com esperança", "com fé", "com orgulho",
+        "com humildade", "com generosidade", "com justiça", "com verdade",
+        "com liberdade", "com delicadeza",
+    ]
+
+    adjetivos = [
+        "esperto", "curioso", "tranquilo", "corajoso", "gentil", "criativo",
+        "alegre", "cuidadoso", "forte", "paciente", "brilhante", "sereno",
+        "rápido", "sábio", "generoso", "persistente", "atento", "calmo",
+    ]
+
+    gerundios = [
+        "estudando", "brincando", "cozinhando", "cantando", "dançando", "lendo",
+        "escrevendo", "pintando", "caminhando", "observando", "trabalhando", "viajando",
+    ]
+
+    eventos = [
+        "choveu", "o telefone tocou", "a campainha soou", "o sol apareceu",
+        "a noite chegou", "o vento aumentou", "o trem partiu", "a música começou",
+        "a estrela brilhou", "a festa terminou", "o mercado abriu", "a aula começou",
+    ]
+
+    condicoes = [
+        "chove", "o vento sopra", "a criança lê", "a semente recebe água",
+        "a turma coopera", "a família conversa", "o músico pratica", "a cidade descansa",
+        "o sol aparece", "a médica escuta", "o atleta treina", "a cientista observa",
+    ]
+
+    consequencias = [
+        "a planta cresce", "as folhas dançam", "o conhecimento aumenta", "a flor nasce",
+        "o trabalho fica leve", "a casa ganha paz", "a canção melhora", "as ruas ficam calmas",
+        "o dia fica claro", "o paciente se sente seguro", "o corpo fica forte", "a descoberta acontece",
+    ]
+
+    contrastes = [
+        "estivesse cansado", "a estrada fosse longa", "o céu estivesse escuro",
+        "o problema parecesse difícil", "a chuva caísse forte", "a sala estivesse cheia",
+        "o tempo fosse curto", "a montanha fosse alta", "o mar estivesse agitado",
+        "a tarefa exigisse esforço",
+    ]
+
+    resultados = [
+        "o menino continuou", "a viajante chegou feliz", "a estrela apareceu",
+        "a equipe encontrou uma solução", "a família cantou na varanda", "a professora explicou com calma",
+        "a turma terminou o projeto", "o alpinista alcançou o topo", "o barco voltou ao porto",
+        "todos aprenderam algo novo",
+    ]
+
+    dialogos_diretos = [
+        "Estudem com dedicação.", "Cuidem da natureza.", "Vamos tentar de novo.",
+        "Amanhã será melhor.", "A música começa agora.", "Preparem a mesa, por favor.",
+        "Observem o céu com atenção.", "A amizade precisa de cuidado.",
+    ]
+
+    acoes = [
+        "dormir", "viajar", "cozinhar", "estudar", "plantar", "correr",
+        "cantar", "pintar", "nadar", "trabalhar", "ler", "ensinar",
+    ]
+
+    acoes_passadas = [
+        "estudou", "ensinou", "cantou", "dançou", "cozinhou", "viajou",
+        "leu", "escreveu", "plantou", "colheu", "observou", "ajudou",
     ]
 
     frases = []
 
     # Padrão 1: Sujeito + verbo + lugar
     for s in sujeitos:
-        for v in verbos:
-            for o in objetos[:5]:
+        for v in verbos[:45]:
+            for o in objetos[:2]:
                 frases.append(f"{s.capitalize()} {v} {o}.")
 
     # Padrão 2: Sujeito + verbo + lugar + complemento
-    for s in sujeitos[:5]:
-        for v in verbos[:5]:
-            for o in objetos[:3]:
+    for s in sujeitos[:20]:
+        for v in verbos[10:30]:
+            for o in objetos[2:4]:
                 for c in complementos[:4]:
                     frases.append(f"{s.capitalize()} {v} {o} {c}.")
 
     # Padrão 3: Frases negativas
-    for s in sujeitos[:5]:
-        for v in verbos[:5]:
+    for s in sujeitos[:30]:
+        for v in verbos[:12]:
             frases.append(f"{s.capitalize()} não {v}.")
 
     # Padrão 4: Perguntas
-    for s in sujeitos[:5]:
-        for v in verbos[:5]:
+    for s in sujeitos[:20]:
+        for v in verbos[:10]:
             frases.append(f"Será que {s} {v}?")
             frases.append(f"Onde {s} {v}?")
+
+    # Padrão 5: Sujeito + ser + adjetivo
+    for i, s in enumerate(sujeitos):
+        frases.append(f"{s.capitalize()} é {adjetivos[i % len(adjetivos)]}.")
+
+    # Padrão 6: Sujeito estava + gerúndio + quando + evento
+    for i, s in enumerate(sujeitos[:48]):
+        frases.append(f"{s.capitalize()} estava {gerundios[i % len(gerundios)]} quando {eventos[i % len(eventos)]}.")
+
+    # Padrão 7: Condição e consequência
+    for i, condicao in enumerate(condicoes):
+        frases.append(f"Se {condicao}, então {consequencias[i % len(consequencias)]}.")
+
+    # Padrão 8: Contraste e resultado
+    for i, contraste in enumerate(contrastes):
+        frases.append(f"Embora {contraste}, {resultados[i % len(resultados)]}.")
+
+    # Padrão 9: Diálogo direto em frase narrativa
+    for i, fala in enumerate(dialogos_diretos):
+        frases.append(f"{sujeitos[i].capitalize()} disse: '{fala}'")
+
+    # Padrão 10: Depois que evento, resultado
+    for i, evento in enumerate(eventos):
+        frases.append(f"Depois que {evento}, {resultados[i % len(resultados)]}.")
+
+    # Padrão 11: Antes de ação, sujeito ação
+    for i, acao in enumerate(acoes):
+        frases.append(f"Antes de {acao}, {sujeitos[i + 5]} {verbos[20 + i]}.")
+
+    # Padrão 12: Não apenas ação, mas também ação
+    for i, acao in enumerate(acoes_passadas):
+        frases.append(f"Não apenas {acao}, mas também {acoes_passadas[(i + 1) % len(acoes_passadas)]}.")
 
     # Histórias mais longas — storytelling
     historias = [
@@ -89,9 +207,29 @@ def gerar_corpus() -> str:
         "A chuva caía suavemente sobre o telhado. A mulher sentava na janela com um livro. O som da chuva era relaxante e tranquilo. Ela lia página após página, imersa na história. Quando a chuva parou, um arco-íris apareceu no céu. Era como se a natureza estivesse pintando um quadro.",
         "O avião sobrevoava as montanhas nevadas. Os passageiros olhavam pela janela maravilhados. As nuvens formavam castelos brancos no céu. O piloto anunciou que Logo chegariam ao destino. A viagem era longa, mas a vista compensava cada minuto. A beleza vista de cima é impossível de esquecer.",
         "Na fazenda, o galo cantava ao amanhecer. As vacas pastavam no campo verde. O fazendeiro cuidava dos animais com carinho. A vida no campo era simples mas feliz. O ar era puro e a água cristalina. Tudo na natureza funcionava em harmonia perfeita.",
+        "No laboratório da escola, a turma misturou água, sal e corante. A professora explicou que cada experiência precisava de observação e registro. Quando os cristais apareceram no copo, todos ficaram admirados. A ciência parecia uma aventura feita de perguntas.",
+        "A floresta acordou com o canto dos pássaros. A borboleta passou pelas flores amarelas e o coelho saiu devagar da toca. Perto do lago, a tartaruga tomou sol em silêncio. A manhã mostrou que cada ser vivo tinha seu ritmo.",
+        "Na avenida movimentada, o carteiro entregava cartas enquanto a jornalista anotava notícias. Os ônibus paravam na estação e as pessoas caminhavam com pressa. Mesmo assim, um músico tocava violão na esquina. A cidade tinha barulho, trabalho e poesia.",
+        "O time treinou no estádio antes do campeonato. A treinadora pediu atenção, respeito e coragem. No último minuto, a menina marcou um gol bonito. A vitória foi celebrada como fruto da união.",
+        "A banda ensaiava numa garagem pequena. O baterista marcava o ritmo e a cantora procurava a nota certa. Depois de muitas tentativas, a música finalmente ganhou forma. Os vizinhos aplaudiram pela janela.",
+        "Na cozinha da avó, o cheiro de pão quente enchia a casa. O padeiro ensinou a sovar a massa com paciência. As crianças esperaram o forno apitar. Quando o pão ficou pronto, todos comeram com manteiga e alegria.",
+        "A família viajou de trem até uma cidade antiga. Pela janela, apareciam rios, plantações e pontes de pedra. No museu, aprenderam histórias sobre outros tempos. A viagem deixou lembranças luminosas.",
+        "Duas amigas encontraram uma carteira perdida no parque. Elas procuraram um guarda e entregaram tudo com cuidado. O dono agradeceu emocionado. Naquele dia, as meninas entenderam que honestidade também é amizade.",
+        "O inverno chegou com noites frias e cobertores pesados. A família preparou sopa e chocolate quente. Do lado de fora, a chuva batia no telhado. Dentro de casa, as conversas aqueciam o coração.",
+        "Na primavera, a florista abriu a loja bem cedo. Rosas, lírios e margaridas coloriam as mesas. Um menino comprou uma flor para a mãe. O pequeno presente deixou a manhã mais doce.",
+        "O golfinho nadava perto do barco dos pesquisadores. A equipe anotava sons, movimentos e caminhos no mar. Ninguém tocava no animal, apenas observava com respeito. A natureza ensinava sem precisar falar.",
+        "Na escola, a biblioteca ganhou novos livros. O professor organizou uma roda de leitura no pátio. Cada estudante escolheu uma história diferente. Ao final, todos queriam contar o que haviam imaginado.",
+        "No hospital, a enfermeira caminhava pelos corredores com calma. Ela conversava com os pacientes e lembrava os horários dos remédios. O médico explicava cada exame com clareza. O cuidado fazia o medo diminuir.",
+        "Durante as festas de junho, a praça recebeu bandeirinhas coloridas. Havia milho, música e dança ao redor da fogueira. A comunidade inteira ajudou na organização. A noite terminou com risadas e céu estrelado.",
+        "O menino sentia saudade do avô que morava longe. Ele escreveu uma carta contando sobre a escola e o cachorro. Dias depois, recebeu uma resposta cheia de carinho. A saudade ficou menor quando as palavras chegaram.",
+        "A arquiteta desenhou uma casa com janelas grandes e jardim aberto. Ela pensou na luz da manhã e na sombra da tarde. A família acompanhou cada detalhe do projeto. Quando a obra terminou, a casa parecia abraçar quem entrava.",
+        "Na praia limpa, voluntários recolheram plástico e redes antigas. A tartaruga voltou ao mar sem obstáculos. Crianças aprenderam por que o lixo machuca os animais. Cuidar do oceano virou promessa coletiva.",
+        "O mecânico abriu a oficina antes do nascer do sol. Ele ouviu o motor do carro e encontrou o problema. Com ferramentas simples, consertou a peça quebrada. O motorista seguiu viagem agradecido.",
+        "A psicóloga organizou uma conversa sobre emoções na escola. Os estudantes falaram de medo, raiva, alegria e vergonha. Ninguém riu das histórias dos colegas. A escuta transformou a sala num lugar mais seguro.",
+        "No acampamento, as crianças aprenderam a montar barracas. À noite, observaram estrelas e inventaram constelações. O vento balançava as árvores com suavidade. Dormiram felizes depois de uma aventura simples.",
     ]
 
-    frases.extend(historias * 5)
+    frases.extend(historias * 3)
 
     # Frases soltas — mais variadas
     frases_soltas = [
@@ -131,9 +269,19 @@ def gerar_corpus() -> str:
         "Nunca é tarde para aprender.",
         "A coragem não é a ausência de medo.",
         "A imaginação é mais importante que o conhecimento.",
+        "A gentileza torna o caminho mais leve.",
+        "A curiosidade move a ciência.",
+        "O trabalho honesto constrói confiança.",
+        "A conversa sincera evita muitos conflitos.",
+        "Cada estação tem sua beleza.",
+        "O silêncio também pode ensinar.",
+        "A família guarda memórias importantes.",
+        "O esporte ensina disciplina e cooperação.",
+        "Cozinhar é uma forma de cuidado.",
+        "Viajar amplia o olhar sobre o mundo.",
     ]
 
-    frases.extend(frases_soltas * 15)
+    frases.extend(frases_soltas * 10)
 
     # Diálogos simples
     dialogos = [
@@ -142,8 +290,92 @@ def gerar_corpus() -> str:
         "— Vamos brincar no parque? — sugeriu o cachorro. — Sim, vamos! — disseram as crianças.",
         "— A comida está deliciosa! — elogiou o visitante. — Obrigada! — disse a cozinheira satisfeita.",
         "— Qual é o seu sonho? — perguntou a amiga. — Eu quero ser cientista! — respondeu a menina.",
+        "— Você viu a chuva chegando? — perguntou o carteiro. — Vi, e trouxe um guarda-chuva extra — respondeu a florista.",
+        "— O treino foi difícil? — perguntou o pai. — Foi, mas eu melhorei meu tempo — disse a atleta.",
+        "— Por que as estrelas brilham? — perguntou a criança. — Porque são bolas enormes de gás quente — explicou a professora.",
+        "— Posso ajudar na cozinha? — perguntou o menino. — Pode lavar os legumes com cuidado — respondeu a avó.",
+        "— O ônibus já passou? — perguntou a jornalista. — Ainda não, ele chega em cinco minutos — disse o motorista.",
+        "— Essa música é nova? — perguntou a vizinha. — Sim, compus ontem à noite — respondeu o músico.",
+        "— O paciente está melhor? — perguntou a enfermeira. — Está respirando com mais calma — respondeu o médico.",
+        "— Vamos plantar uma árvore? — sugeriu a menina. — Vamos cuidar dela todos os dias — respondeu o amigo.",
+        "— O mar está agitado hoje? — perguntou o pescador. — Está, precisamos esperar o vento diminuir — disse o piloto.",
+        "— Você terminou o desenho? — perguntou a arquiteta. — Terminei e acrescentei uma janela maior — disse o estudante.",
+        "— A feira está cheia? — perguntou a mãe. — Está cheia de frutas maduras — respondeu a filha.",
+        "— O livro te emocionou? — perguntou o avô. — Sim, parecia falar comigo — respondeu a neta.",
+        "— Podemos observar a borboleta? — perguntou o menino. — Podemos, mas sem tocar nas asas — explicou a veterinária.",
+        "— O que faremos nas férias? — perguntou o irmão. — Visitaremos a montanha e o lago — respondeu a irmã.",
+        "— Você está triste? — perguntou a amiga. — Estou, mas conversar ajuda bastante — respondeu o colega.",
     ]
-    frases.extend(dialogos * 10)
+    frases.extend(dialogos * 5)
+
+    # Fatos sobre o mundo
+    fatos = [
+        "A Terra gira em torno do Sol.",
+        "A água ferve a cem graus Celsius ao nível do mar.",
+        "O Brasil é o maior país da América do Sul.",
+        "A Lua é o satélite natural da Terra.",
+        "As plantas produzem oxigênio durante a fotossíntese.",
+        "O coração bombeia sangue pelo corpo.",
+        "Os peixes respiram principalmente por brânquias.",
+        "As abelhas ajudam na polinização de muitas plantas.",
+        "O arco-íris aparece quando a luz atravessa gotas de água.",
+        "O inverno é uma das quatro estações do ano.",
+        "O oceano cobre a maior parte da superfície da Terra.",
+        "A Amazônia abriga enorme diversidade de seres vivos.",
+        "O som precisa de um meio material para se propagar.",
+        "A luz viaja mais rápido que o som.",
+        "Os livros podem preservar histórias por muitos anos.",
+        "A vacinação ajuda a prevenir doenças.",
+        "O trânsito fica mais seguro com respeito às regras.",
+        "A reciclagem reduz a quantidade de lixo descartado.",
+        "O café é uma bebida muito consumida no Brasil.",
+        "O futebol é um esporte praticado em muitos países.",
+        "A música pode combinar ritmo, melodia e harmonia.",
+        "A culinária brasileira mistura influências indígenas, africanas e europeias.",
+        "As bibliotecas guardam livros, jornais e outros materiais de consulta.",
+        "O calendário organiza dias, semanas, meses e anos.",
+        "A bússola ajuda a indicar direções.",
+        "O sol fornece luz e calor para a Terra.",
+        "Os rios levam água doce por diferentes regiões.",
+        "As montanhas podem se formar por movimentos da crosta terrestre.",
+        "O corpo humano precisa de água para funcionar bem.",
+        "A educação amplia oportunidades e conhecimentos.",
+        "As nuvens são formadas por pequenas gotas de água ou cristais de gelo.",
+        "Os mapas representam lugares e caminhos.",
+        "O mel é produzido pelas abelhas a partir do néctar das flores.",
+        "A gravidade atrai os objetos em direção à Terra.",
+        "O relógio mede a passagem do tempo.",
+    ]
+    frases.extend(fatos * 6)
+
+    # Descrições de cenas, objetos e ambientes
+    descricoes = [
+        "O céu estava azul e sem nuvens.",
+        "A casa tinha uma porta vermelha e janelas grandes.",
+        "O jardim cheirava a terra molhada e flores recém-abertas.",
+        "A rua estreita tinha pedras antigas e postes amarelos.",
+        "O mercado estava cheio de frutas coloridas e vozes animadas.",
+        "A biblioteca era silenciosa, iluminada por lâmpadas suaves.",
+        "O rio passava devagar entre árvores altas e sombras frescas.",
+        "A montanha parecia dourada ao receber a luz do fim da tarde.",
+        "O quarto era pequeno, mas organizado e cheio de livros.",
+        "A cozinha tinha panelas brilhantes e cheiro de bolo assado.",
+        "O estádio vibrava com bandeiras, tambores e cantos da torcida.",
+        "A praia estava calma, com ondas baixas e areia clara.",
+        "A floresta era densa, úmida e repleta de sons escondidos.",
+        "O museu tinha corredores amplos e quadros de cores profundas.",
+        "A estação parecia apressada, com malas, anúncios e passos rápidos.",
+        "O hospital tinha paredes claras e corredores muito limpos.",
+        "A fazenda exibia campos verdes, cercas de madeira e um céu imenso.",
+        "O escritório tinha mesas alinhadas e plantas perto da janela.",
+        "A caverna era fria, escura e cheia de ecos.",
+        "O deserto se estendia em ondas de areia sob o sol forte.",
+        "A neve cobria telhados, ruas e galhos com silêncio branco.",
+        "O porto tinha barcos coloridos, redes secando e cheiro de sal.",
+        "A sala de aula estava enfeitada com cartazes e desenhos dos estudantes.",
+        "O restaurante tinha luz baixa, música tranquila e mesas bem postas.",
+    ]
+    frases.extend(descricoes * 8)
 
     random.seed(42)
     random.shuffle(frases)

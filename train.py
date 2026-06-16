@@ -18,6 +18,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data import random_split
 
 from config import GPTConfig
+from data.corpus import augmentar_texto, permutar_frases
 from model import GPTModel
 from tokenizer import CharTokenizer, BPETokenizer, criar_tokenizer, carregar_tokenizer
 
@@ -119,10 +120,28 @@ def treinar(
     print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens")
     print(f"  Tokens únicos: {tokenizer.vocab_size}")
 
-    # Split treino/validação
+    # ── Data augmentation ──
+    # Cria variações do corpus para reduzir overfitting
+    import random as _random
+    _random.seed(42)
+
+    # Permutar frases: embaralha a ordem das frases
+    texto_permutado = permutar_frases(texto)
+    tokens_permutados = tokenizer.codificar(texto_permutado)
+
+    # Augmentação com dropout de tokens
+    texto_augmentado = augmentar_texto(texto, prob_dropout=0.05)
+    tokens_augmentados = tokenizer.codificar(texto_augmentado)
+
+    print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
+
+    # Split treino/validação (apenas nos tokens originais)
     val_size = int(len(tokens) * config.val_split)
-    train_tokens = tokens[:-val_size] if val_size > 0 else tokens
     val_tokens = tokens[-val_size:] if val_size > 0 else None
+
+    # Treino = original (sem val) + permutado + augmentado
+    train_tokens = tokens[:-val_size] if val_size > 0 else tokens
+    train_tokens = train_tokens + tokens_permutados + tokens_augmentados
 
     train_dataset = TextDataset(train_tokens, config.context_len)
     train_loader = DataLoader(

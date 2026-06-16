@@ -11,20 +11,20 @@ from dataclasses import dataclass
 @dataclass
 class GPTConfig:
     # --- Dimensões do modelo (aumentadas!) ---
-    d_model: int = 128
+    d_model: int = 64
     n_heads: int = 4
-    n_layers: int = 4
+    n_layers: int = 2
 
     # --- Janela de contexto (aumentada!) ---
     context_len: int = 256
 
     # --- Regularização ---
-    dropout: float = 0.1
+    dropout: float = 0.3
 
     # --- Treinamento ---
     batch_size: int = 32
     learning_rate: float = 3e-4
-    weight_decay: float = 0.1
+    weight_decay: float = 0.3
     max_epochs: int = 30
 
     # --- Otimizador ---
@@ -35,7 +35,7 @@ class GPTConfig:
     max_grad_norm: float = 1.0
 
     # --- LR scheduler: warmup + cosine decay ---
-    warmup_steps: int = 100
+    warmup_steps: int = 200
     min_lr: float = 1e-5
 
     # --- NOVO: Gradient accumulation ---
@@ -45,7 +45,7 @@ class GPTConfig:
 
     # --- NOVO: Validação e early stopping ---
     val_split: float = 0.1
-    patience: int = 5
+    patience: int = 8
 
     # --- NOVO: Estratégias de geração ---
     top_p: float = 0.9
