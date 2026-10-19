@@ -40,9 +40,19 @@ class TextDataset(Dataset):
         return x, y
 
 
-def get_lr(it: int, config: GPTConfig) -> float:
+def separar_validacao(texto: str, val_split: float) -> tuple[str, str]:
+    """Separa o final do texto (val_split) pra validação, cortando entre duas frases."""
+    if val_split <= 0:
+        return texto, ""
+    corte = texto.find(". ", int(len(texto) * (1 - val_split)))
+    if corte == -1:
+        return texto, ""
+    return texto[: corte + 1], texto[corte + 2 :]
+
+
+def get_lr(it: int, config: GPTConfig, total_passos: int) -> float:
     """
-    Scheduler de learning rate: Warmup + Cosine Decay.
+    Scheduler de learning rate: Warmup + Cosine Decay até total_passos.
 
     lr │    ___....───────┐
        │   /              ╲
@@ -54,7 +64,7 @@ def get_lr(it: int, config: GPTConfig) -> float:
     if it < config.warmup_steps:
         return config.learning_rate * (it + 1) / config.warmup_steps
 
-    progress = (it - config.warmup_steps) / max(1, 10000 - config.warmup_steps)
+    progress = (it - config.warmup_steps) / max(1, total_passos - config.warmup_steps)
     progress = min(progress, 1.0)
     coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
@@ -115,33 +125,35 @@ def treinar(
     print(f"  {tokenizer}")
     config.vocab_size = tokenizer.vocab_size
 
+    # ── Split treino/validação ──
+    # Separa o TEXTO antes da augmentação: as cópias permutada e com dropout
+    # saem só do trecho de treino. Se saíssem do corpus inteiro, todas as
+    # frases da validação apareceriam no treino e a val loss não mediria nada.
+    texto_treino, texto_val = separar_validacao(texto, config.val_split)
+
     # ── Dataset ──
-    tokens = tokenizer.codificar(texto)
-    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens")
+    tokens = tokenizer.codificar(texto_treino)
+    val_tokens = tokenizer.codificar(texto_val)
+    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens de treino + {len(val_tokens):,} de validação")
     print(f"  Tokens únicos: {tokenizer.vocab_size}")
 
     # ── Data augmentation ──
-    # Cria variações do corpus para reduzir overfitting
+    # Cria variações do trecho de treino para reduzir overfitting
     import random as _random
     _random.seed(42)
 
     # Permutar frases: embaralha a ordem das frases
-    texto_permutado = permutar_frases(texto)
+    texto_permutado = permutar_frases(texto_treino)
     tokens_permutados = tokenizer.codificar(texto_permutado)
 
     # Augmentação com dropout de tokens
-    texto_augmentado = augmentar_texto(texto, prob_dropout=0.05)
+    texto_augmentado = augmentar_texto(texto_treino, prob_dropout=0.05)
     tokens_augmentados = tokenizer.codificar(texto_augmentado)
 
     print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
 
-    # Split treino/validação (apenas nos tokens originais)
-    val_size = int(len(tokens) * config.val_split)
-    val_tokens = tokens[-val_size:] if val_size > 0 else None
-
     # Treino = original (sem val) + permutado + augmentado
-    train_tokens = tokens[:-val_size] if val_size > 0 else tokens
-    train_tokens = train_tokens + tokens_permutados + tokens_augmentados
+    train_tokens = tokens + tokens_permutados + tokens_augmentados
 
     train_dataset = TextDataset(train_tokens, config.context_len)
     train_loader = DataLoader(
@@ -163,10 +175,14 @@ def treinar(
             pin_memory=device != "cpu",
         )
 
+    # O cosine decay do LR termina no fim da última época planejada
+    total_passos = math.ceil(len(train_loader) / config.gradient_accum_steps) * config.max_epochs
+
     print(f"  Batch size: {config.batch_size}")
     print(f"  Gradient accumulation: {config.gradient_accum_steps}x")
     print(f"  Batch efetivo: {config.batch_size * config.gradient_accum_steps}")
     print(f"  Batches por época: {len(train_loader)}")
+    print(f"  Passos de otimização: {total_passos:,} em {config.max_epochs} épocas")
     print(f"  Validação: {'Sim' if val_loader else 'Não'}")
 
     # ── Modelo ──
@@ -197,6 +213,7 @@ def treinar(
 
     total_tokens_treinados = 0
     tempo_inicio = time.time()
+    ultimo_progresso = tempo_inicio
     log_epocas = []
 
     print(f"\nIniciando treino por {config.max_epochs} épocas...")
@@ -225,9 +242,23 @@ def treinar(
             n_batches += 1
             total_tokens_treinados += x.shape[0] * x.shape[1]
 
+            # Progresso dentro da época: numa GPU remota uma época pode levar
+            # vários minutos, e sem isso nada aparece no log até ela acabar
+            if time.time() - ultimo_progresso >= 30:
+                ultimo_progresso = time.time()
+                decorrido = ultimo_progresso - tempo_inicio
+                feitos = (epoca - 1) * len(train_loader) + n_batches
+                faltam_min = (len(train_loader) * config.max_epochs - feitos) * decorrido / feitos / 60
+                print(
+                    f"  batch {n_batches:,}/{len(train_loader):,} │ "
+                    f"Loss: {epoca_loss / n_batches:.4f} │ "
+                    f"{total_tokens_treinados / decorrido:,.0f} tokens/s │ "
+                    f"faltam até ~{faltam_min:.0f} min"
+                )
+
             # Backward + update a cada gradient_accum_steps
             if accum_count % config.gradient_accum_steps == 0:
-                lr = get_lr(step_global, config)
+                lr = get_lr(step_global, config, total_passos)
                 for param_group in otimizador.param_groups:
                     param_group["lr"] = lr
 
@@ -240,7 +271,7 @@ def treinar(
 
         # Remanescente de accumulation
         if accum_count % config.gradient_accum_steps != 0:
-            lr = get_lr(step_global, config)
+            lr = get_lr(step_global, config, total_passos)
             for param_group in otimizador.param_groups:
                 param_group["lr"] = lr
             torch.nn.utils.clip_grad_norm_(
@@ -254,7 +285,7 @@ def treinar(
         elapsed = time.time() - t0
         perplexidade = math.exp(min(media_loss, 20))
 
-        lr_atual = get_lr(step_global, config)
+        lr_atual = get_lr(step_global, config, total_passos)
 
         # Validação
         val_str = ""

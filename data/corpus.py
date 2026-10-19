@@ -480,22 +480,16 @@ def gerar_dados_dpo() -> list[tuple[str, str, str]]:
 # Carregar/salvar corpus
 # ──────────────────────────────────────────────────────────
 
-def salvar_corpus(caminho: str = "data/corpus.txt") -> str:
-    """Gera e salva o corpus em arquivo. Retorna o texto."""
+def carregar_corpus() -> str:
+    """
+    Gera o corpus sintético na hora.
+
+    É determinístico (seed 42) e leva milissegundos, então não fica salvo em
+    disco: um arquivo salvo ficaria desatualizado sempre que gerar_corpus mudasse.
+    """
     texto = gerar_corpus()
-    Path(caminho).write_text(texto, encoding="utf-8")
-    print(f"Corpus salvo em '{caminho}': {len(texto):,} caracteres")
+    print(f"Corpus sintético gerado: {len(texto):,} caracteres")
     return texto
-
-
-def carregar_corpus(caminho: str = "data/corpus.txt") -> str:
-    """Carrega corpus de arquivo, ou gera se não existir."""
-    path = Path(caminho)
-    if path.exists():
-        texto = path.read_text(encoding="utf-8")
-        print(f"Corpus carregado de '{caminho}': {len(texto):,} caracteres")
-        return texto
-    return salvar_corpus(caminho)
 
 
 def carregar_corpus_externo(caminho: str) -> str:

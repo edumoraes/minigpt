@@ -25,7 +25,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from config import GPTConfig
 from model import GPTModel
-from tokenizer import CharTokenizer, BPETokenizer
+from tokenizer import CharTokenizer, BPETokenizer, EOS_ID
 
 
 SEPARATOR = " Resposta: "
@@ -65,11 +65,13 @@ class SFTDataset(Dataset):
             if len(tokens_completo) > context_len:
                 continue
 
-            # Input: tokens_completo, Target: shift right, com mask
+            # Input: tokens_completo, Target: shift right terminando em <EOS>,
+            # pra o modelo aprender a parar depois da resposta
             input_ids = tokens_completo
-            targets = tokens_completo[1:] + [0]
-            # Máscara: ignorar tokens da instrução
-            targets = [-100] * min(inst_len, len(targets)) + targets[inst_len:]
+            targets = tokens_completo[1:] + [EOS_ID]
+            # Máscara: ignorar os alvos dentro da instrução. O alvo da posição
+            # inst_len - 1 é o 1º token da resposta, então ele fica de fora.
+            targets = [IGNORE_INDEX] * (inst_len - 1) + targets[inst_len - 1:]
             targets = targets[: len(input_ids)]
 
             if len(input_ids) > 0 and len(targets) > 0:

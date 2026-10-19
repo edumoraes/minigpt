@@ -32,6 +32,8 @@ from pathlib import Path
 
 
 TOKENS_ESPECIAIS = ["<PAD>", "<UNK>", "<BOS>", "<EOS>"]
+# Os dois tokenizadores põem os tokens especiais primeiro, então os IDs são fixos
+EOS_ID = TOKENS_ESPECIAIS.index("<EOS>")
 
 
 # ──────────────────────────────────────────────────────────
