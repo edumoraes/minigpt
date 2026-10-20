@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="pt-BR" data-modelo="__REPO_MODELO__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>devaneio</title>
+<meta name="description" content="Um GPT pequeno treinado do zero em português, rodando no seu navegador.">
+<style>
+  :root {
+    --fundo: #f7f5f0;
+    --superficie: #ffffff;
+    --borda: #e3dfd6;
+    --texto: #1f1d1a;
+    --suave: #6b665d;
+    --destaque: #5b4bc4;
+    --destaque-texto: #ffffff;
+    --gerado: #3d2fa8;
+    --chip: #efecf9;
+    --sombra: 0 1px 2px rgb(31 29 26 / 6%), 0 8px 24px rgb(31 29 26 / 6%);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fundo: #141318;
+      --superficie: #1d1c23;
+      --borda: #302e39;
+      --texto: #ecebf1;
+      --suave: #9c99a8;
+      --destaque: #9d8ff5;
+      --destaque-texto: #141318;
+      --gerado: #c2b8ff;
+      --chip: #2a2738;
+      --sombra: none;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--fundo);
+    color: var(--texto);
+    font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 56px; }
+  h1 { font-size: 2rem; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .lead { color: var(--suave); margin: 0 0 28px; max-width: 62ch; }
+  a { color: var(--destaque); }
+  .cartao {
+    background: var(--superficie);
+    border: 1px solid var(--borda);
+    border-radius: 14px;
+    box-shadow: var(--sombra);
+    padding: 18px;
+  }
+  label.titulo { display: block; font-weight: 600; font-size: 0.92rem; margin-bottom: 8px; }
+  textarea {
+    width: 100%;
+    min-height: 84px;
+    resize: vertical;
+    padding: 12px 14px;
+    border: 1px solid var(--borda);
+    border-radius: 10px;
+    background: var(--fundo);
+    color: var(--texto);
+    font: inherit;
+  }
+  textarea:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--destaque);
+    outline-offset: 2px;
+  }
+  .exemplos { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+  .exemplos button {
+    border: 0;
+    border-radius: 999px;
+    padding: 5px 12px;
+    background: var(--chip);
+    color: var(--texto);
+    font: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+  }
+  details { margin-top: 14px; border-top: 1px solid var(--borda); padding-top: 12px; }
+  summary { cursor: pointer; color: var(--suave); font-size: 0.92rem; }
+  .ajustes { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px 24px; margin-top: 14px; }
+  .ajuste label { display: flex; justify-content: space-between; font-size: 0.88rem; color: var(--suave); }
+  .ajuste output { color: var(--texto); font-variant-numeric: tabular-nums; }
+  .ajuste input { width: 100%; accent-color: var(--destaque); }
+  .acoes { display: flex; align-items: center; gap: 14px; margin-top: 16px; flex-wrap: wrap; }
+  #gerar {
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 22px;
+    background: var(--destaque);
+    color: var(--destaque-texto);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #gerar:disabled { opacity: 0.5; cursor: wait; }
+  .dica { color: var(--suave); font-size: 0.85rem; }
+  #status { margin: 18px 0 10px; color: var(--suave); font-size: 0.9rem; min-height: 1.5em; }
+  #status.erro { color: #c4314b; }
+  progress { width: 100%; height: 6px; accent-color: var(--destaque); }
+  #saida {
+    min-height: 160px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 1.04rem;
+  }
+  #saida .prompt { color: var(--suave); }
+  #saida .gerado { color: var(--gerado); }
+  #saida.vazia::before { content: "O texto gerado aparece aqui."; color: var(--suave); }
+  #saida.gerando .gerado::after {
+    content: "▍";
+    animation: piscar 1s steps(1) infinite;
+    color: var(--destaque);
+  }
+  @keyframes piscar { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { #saida.gerando .gerado::after { animation: none; } }
+  footer { margin-top: 28px; color: var(--suave); font-size: 0.85rem; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>devaneio</h1>
+  <p class="lead">
+    Um GPT de <span id="parametros">6,8M</span> parâmetros treinado do zero em português.
+    Aprendeu a gramática e o vocabulário, mas não fatos: o texto sai fluente e sem
+    compromisso com a verdade. Escreva o começo de um texto e ele continua.
+  </p>
+
+  <div class="cartao">
+    <label class="titulo" for="prompt">Começo do texto</label>
+    <textarea id="prompt" maxlength="1000" placeholder="A chuva"></textarea>
+    <div class="exemplos" aria-label="Exemplos"></div>
+
+    <details>
+      <summary>Ajustes de amostragem</summary>
+      <div class="ajustes">
+        <div class="ajuste">
+          <label for="maxTokens">Tokens a gerar <output for="maxTokens"></output></label>
+          <input id="maxTokens" type="range" min="10" max="400" step="10" value="120">
+        </div>
+        <div class="ajuste">
+          <label for="temperatura">Temperatura <output for="temperatura"></output></label>
+          <input id="temperatura" type="range" min="0.1" max="1.5" step="0.05" value="0.8">
+        </div>
+        <div class="ajuste">
+          <label for="topK">Top-k (0 desliga) <output for="topK"></output></label>
+          <input id="topK" type="range" min="0" max="200" step="1" value="40">
+        </div>
+        <div class="ajuste">
+          <label for="topP">Top-p <output for="topP"></output></label>
+          <input id="topP" type="range" min="0.1" max="1" step="0.05" value="0.9">
+        </div>
+        <div class="ajuste">
+          <label for="penalidade">Penalidade de repetição <output for="penalidade"></output></label>
+          <input id="penalidade" type="range" min="1" max="2" step="0.05" value="1.2">
+        </div>
+      </div>
+    </details>
+
+    <div class="acoes">
+      <button id="gerar" type="button" disabled>Gerar</button>
+      <span class="dica">Ctrl+Enter também gera</span>
+    </div>
+  </div>
+
+  <div id="status" role="status">Baixando o modelo…</div>
+  <progress id="progresso" max="1" value="0"></progress>
+
+  <div class="cartao">
+    <div id="saida" class="vazia" aria-live="polite"><span class="prompt"></span><span class="gerado"></span></div>
+  </div>
+
+  <footer>
+    <p>
+      Roda no seu navegador: os pesos vêm do repositório <a id="link-modelo" href="#">do modelo no Hugging Face</a>
+      e o texto que você escreve não sai daqui.
+    </p>
+    <p>Código: <a href="https://github.com/edumoraes/minigpt">github.com/edumoraes/minigpt</a></p>
+  </footer>
+</main>
+
+<script type="module">
+  const EXEMPLOS = ["A chuva", "Na cidade de São Paulo", "A fotossíntese é", "Era uma vez", "O professor explicou que"];
+  const AJUSTES = ["maxTokens", "temperatura", "topK", "topP", "penalidade"];
+
+  const $ = (id) => document.getElementById(id);
+  const repo = document.documentElement.dataset.modelo;
+  // ?modelo=<url> troca a origem dos pesos (ex.: uma pasta local nos testes)
+  const base = new URL(
+    new URLSearchParams(location.search).get("modelo") ?? `https://huggingface.co/${repo}/resolve/main`,
+    location.href,
+  ).href;
+  $("link-modelo").href = `https://huggingface.co/${repo}`;
+
+  const numero = (valor, casas = 1) => valor.toLocaleString("pt-BR", { maximumFractionDigits: casas, minimumFractionDigits: casas });
+  const status = (texto, erro = false) => {
+    $("status").textContent = texto;
+    $("status").classList.toggle("erro", erro);
+  };
+
+  for (const id of AJUSTES) {
+    const entrada = $(id);
+    const mostrar = () => { entrada.labels[0].querySelector("output").textContent = entrada.value.replace(".", ","); };
+    entrada.addEventListener("input", mostrar);
+    mostrar();
+  }
+
+  const worker = new Worker("./worker.js", { type: "module" });
+  let gerando = false;
+  let modeloPronto = false;
+
+  function iniciar() {
+    const prompt = $("prompt").value || $("prompt").placeholder;
+    if (!prompt.trim()) {
+      status("Escreva o começo de um texto.");
+      return;
+    }
+    const opcoes = Object.fromEntries(AJUSTES.map((id) => [id, Number($(id).value)]));
+    const saida = $("saida");
+    saida.classList.remove("vazia");
+    saida.classList.add("gerando");
+    saida.querySelector(".prompt").textContent = prompt;
+    saida.querySelector(".gerado").textContent = "";
+    gerando = true;
+    $("gerar").textContent = "Parar";
+    status("Gerando…");
+    worker.postMessage({ tipo: "gerar", prompt, opcoes });
+  }
+
+  $("gerar").addEventListener("click", () => {
+    if (gerando) worker.postMessage({ tipo: "parar" });
+    else iniciar();
+  });
+  $("prompt").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && modeloPronto && !gerando) {
+      e.preventDefault();
+      iniciar();
+    }
+  });
+
+  const exemplos = document.querySelector(".exemplos");
+  for (const exemplo of EXEMPLOS) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.textContent = exemplo;
+    botao.addEventListener("click", () => {
+      $("prompt").value = exemplo;
+      if (modeloPronto && !gerando) iniciar();
+    });
+    exemplos.append(botao);
+  }
+
+  worker.onmessage = ({ data }) => {
+    if (data.tipo === "progresso") {
+      const mb = (bytes) => numero(bytes / 1e6);
+      if (data.total) {
+        $("progresso").value = data.recebidos / data.total;
+        status(`Baixando o modelo… ${mb(data.recebidos)} de ${mb(data.total)} MB`);
+      } else {
+        status(`Baixando o modelo… ${mb(data.recebidos)} MB`);
+      }
+    } else if (data.tipo === "pronto") {
+      modeloPronto = true;
+      $("progresso").hidden = true;
+      $("parametros").textContent = `${numero(data.parametros / 1e6)}M`;
+      $("gerar").disabled = false;
+      status(`Modelo carregado no navegador: ${numero(data.parametros / 1e6)}M parâmetros, contexto de ${data.contexto} tokens.`);
+    } else if (data.tipo === "token") {
+      $("saida").querySelector(".gerado").textContent += data.texto;
+    } else if (data.tipo === "fim") {
+      gerando = false;
+      $("saida").classList.remove("gerando");
+      $("gerar").textContent = "Gerar";
+      const porSegundo = data.segundos > 0 ? data.tokens / data.segundos : 0;
+      status(`${data.tokens} tokens em ${numero(data.segundos)} s (${numero(porSegundo, 0)} tokens/s).`);
+    } else if (data.tipo === "erro") {
+      gerando = false;
+      $("saida").classList.remove("gerando");
+      $("gerar").textContent = "Gerar";
+      $("gerar").disabled = !modeloPronto;
+      status(modeloPronto ? `Erro: ${data.mensagem}` : `Não foi possível carregar o modelo: ${data.mensagem}`, true);
+    }
+  };
+
+  worker.postMessage({ tipo: "carregar", base });
+</script>
+</body>
+</html>

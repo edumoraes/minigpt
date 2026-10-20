@@ -1,5 +1,6 @@
 torch>=2.3.0
 numpy>=1.24.0
-# Só pro `main.py prep` (o Colab já tem os dois)
+# Só pro `main.py prep` e o publicar_hf.py (o Colab já tem os três)
 pyarrow
 huggingface_hub
+safetensors

@@ -34,10 +34,22 @@ Everything on the VM runs inside its first `colab exec`. A later exec reattaches
 
 Cost: an epoch covers every sliding window of `context_len` tokens over ~413k tokens (the train split plus two augmented copies), ~12.9k batches at batch_size 32. On a T4 (~590k tokens/s, 1.07 compute units/hour in Oct 2026) that is ~3 min per epoch: `--etapas "train --epochs 3" sft dpo sample` took 10.6 min, and the default 30 epochs would take ~1.5 h. `train` prints throughput and an upper-bound ETA every 30 s. With `--dados` an epoch is `--tokens / context_len` windows (150M tokens → 18.3k batches at batch_size 32). In fp32 (`--no-amp`) the 6.8M-param preset runs at ~47-52k tokens/s on a T4: `--etapas prep "train --dados dados" sft dpo sample` took 60.7 min and 1.03 units, with prep 6.6 min, train 52.9 min (val loss 2.65) and the rest ~1 min. fp16, the default on a T4, runs at ~108k tokens/s: on the same VM with 10M tokens, train took 92 s against 193 s in fp32, with val loss 3.935 against 3.928. That puts 150M tokens at ~23 min.
 
+## Publishing on Hugging Face
+
+```bash
+hf auth login                                   # once, with a write token
+python publicar_hf.py --nome devaneio           # model repo + static Space, both public, under the logged-in user
+python publicar_hf.py --nome devaneio --pasta /tmp/x   # only builds the files, uploads nothing
+```
+
+`publicar_hf.py` runs locally (needs torch, safetensors, huggingface_hub). It loads `output/melhor_modelo.pt` (refuses SFT/DPO checkpoints, since the card describes pre-training), saves `model.safetensors` with `save_model` (stores the tied embedding once) plus `config.json` (`asdict(GPTConfig)`), generates the model card from `output/log_treino.json`, and copies `config.py model.py tokenizer.py generate.py` into the model repo. Running it again updates both repos (unchanged files make no commit).
+
+The Space is static because Gradio and Docker Spaces on the free CPU need a PRO subscription (`402 Payment Required`). `space/minigpt.js` ports the forward pass (with a KV cache), the BPE encoder and the sampling of `generate.py` to plain JS; `space/worker.js` runs it in a Web Worker; `space/index.html` is the page, with `__REPO_MODELO__` replaced by the script, and downloads the three model files from `https://huggingface.co/<repo>/resolve/main` (CORS works). Once the context fills, the window restarts with the newest half of the tokens, where `generate.py` slides it by one. Checked against PyTorch in Node: identical token ids on 206 texts, logits within 2e-5 at all 256 positions, sampling probabilities within 7e-6; ~80 tokens/s in the browser. To test the page with local weights: `python publicar_hf.py --nome x --pasta /tmp/x`, `python -m http.server -d /tmp/x`, open `http://localhost:8000/space/?modelo=../modelo`.
+
 ## Dependencies
 
 ```bash
-pip install -r requirements.txt   # torch, numpy; pyarrow + huggingface_hub only for prep (Colab has all four)
+pip install -r requirements.txt   # torch, numpy; pyarrow, huggingface_hub, safetensors only for prep and publicar_hf.py
 ```
 
 No build step, no test suite, no linter configured.
@@ -57,6 +69,7 @@ No build step, no test suite, no linter configured.
 | `data/corpus.py` | Synthetic corpus generator, augmentation, SFT/DPO pairs |
 | `data/preparar.py` | `prep`: reads GigaVerbo-v2 `edu_high` row group by row group, trains the BPE, writes `dados/` |
 | `colab_train.py` | Runs the stages on a Colab VM |
+| `publicar_hf.py`, `space/` | Publishes the pre-trained model and a static Space that runs it in the browser (JS port in `space/minigpt.js`) |
 
 - **The corpus is generated on every run** (`carregar_corpus()` calls `gerar_corpus()`, deterministic with seed 42, ~10 ms). There is no cached file; edit `data/corpus.py` to change the data.
 - **The validation split happens before augmentation**: the permuted and char-dropout copies come only from the train part. About 11% of val sentences still appear in train because the corpus repeats sentences.
