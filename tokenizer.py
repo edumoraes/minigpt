@@ -27,11 +27,20 @@ Exemplo com "gato gato":
 
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 
 TOKENS_ESPECIAIS = ["<PAD>", "<UNK>", "<BOS>", "<EOS>"]
+# Os dois tokenizadores põem os tokens especiais primeiro, então os IDs são fixos
+EOS_ID = TOKENS_ESPECIAIS.index("<EOS>")
+
+# Pré-tokenização do BPE: palavras (com a pontuação grudada) e espaços
+PADRAO_CHUNKS = re.compile(r"\S+|\s+")
+# Chunks já codificados guardados pelo BPE. As palavras comuns se repetem
+# muito, então o limite cobre quase todo o texto sem crescer sem fim
+TAMANHO_CACHE = 500_000
 
 
 # ──────────────────────────────────────────────────────────
@@ -113,58 +122,110 @@ class BPETokenizer:
         self.vocab: dict[str, int] = {}
         self.id_to_token: dict[int, str] = {}
         self.vocab_size: int = 0
+        self._preparar_codificacao()
 
-    def treinar(self, texto: str, vocab_size: int = 500) -> None:
+    def treinar(
+        self, texto: str | Iterable[str], vocab_size: int = 500, cobertura: float = 1.0
+    ) -> None:
         """
         Treina o BPE: iterativamente merge os pares mais frequentes.
 
         Args:
-            texto: corpus de treino
+            texto: corpus de treino, ou vários textos (ex.: documentos)
             vocab_size: tamanho alvo do vocabulário
+            cobertura: fração das ocorrências de caracteres que o vocabulário
+                base cobre. Com 1.0 entram todos; com 0.9999 os mais raros
+                (emoji, outros alfabetos) ficam de fora e viram <UNK>
         """
         # Pre-tokenizar: separar em palavras (não-espaço) e espaços
-        chunks = re.findall(r"\S+|\s+", texto)
-        freq_chunks = Counter(chunks)
+        freq_chunks: Counter[str] = Counter()
+        for t in [texto] if isinstance(texto, str) else texto:
+            freq_chunks.update(PADRAO_CHUNKS.findall(t))
 
-        # Inicializar: cada chunk como sequência de caracteres
-        chunk_splits: dict[str, list[str]] = {c: list(c) for c in freq_chunks}
-
-        # Vocabulário base: tokens especiais + todos os caracteres únicos
-        todos_chars = sorted(
-            set(c for pieces in chunk_splits.values() for c in pieces)
-        )
-        base_tokens = list(TOKENS_ESPECIAIS) + todos_chars
+        # Vocabulário base: tokens especiais + os caracteres que entram na cobertura
+        freq_chars: Counter[str] = Counter()
+        for chunk, n in freq_chunks.items():
+            for c in chunk:
+                freq_chars[c] += n
+        total_chars = sum(freq_chars.values())
+        chars_base: set[str] = set()
+        acumulado = 0
+        for c, n in freq_chars.most_common():
+            if acumulado >= cobertura * total_chars:
+                break
+            chars_base.add(c)
+            acumulado += n
+        base_tokens = list(TOKENS_ESPECIAIS) + sorted(chars_base)
 
         self.vocab = {t: i for i, t in enumerate(base_tokens)}
         self.id_to_token = {i: t for i, t in enumerate(base_tokens)}
         self.merges = []
 
+        # Cada chunk começa como sequência de caracteres. Os que têm algum
+        # caractere fora do vocabulário base não entram nos merges
+        palavras = [c for c in freq_chunks if chars_base.issuperset(c)]
+        pecas = [list(p) for p in palavras]
+        freqs = [freq_chunks[p] for p in palavras]
+
+        # Contagem dos pares adjacentes, ponderada pela frequência do chunk, e
+        # em quais chunks cada par aparece. Assim cada merge só recalcula os
+        # chunks que contêm o par, em vez de recontar o corpus inteiro
+        freq_pares: defaultdict[tuple[str, str], int] = defaultdict(int)
+        onde: defaultdict[tuple[str, str], set[int]] = defaultdict(set)
+        for i, (ps, f) in enumerate(zip(pecas, freqs)):
+            for par in zip(ps, ps[1:]):
+                freq_pares[par] += f
+                onde[par].add(i)
+
+        def primeira_ocorrencia(par: tuple[str, str]) -> tuple[int, int]:
+            # Desempate: o par que aparece primeiro no texto (chunk, posição)
+            i = min(onde[par])
+            return i, list(zip(pecas[i], pecas[i][1:])).index(par)
+
         # Loop de merges
-        while len(self.vocab) < vocab_size:
-            # Contar pares adjacentes ponderados pela frequência do chunk
-            pair_freq: Counter[tuple[str, str]] = Counter()
-            for chunk, count in freq_chunks.items():
-                pieces = chunk_splits[chunk]
-                for i in range(len(pieces) - 1):
-                    pair_freq[(pieces[i], pieces[i + 1])] += count
-
-            if not pair_freq:
-                break
-
+        while len(self.vocab) < vocab_size and freq_pares:
             # Merge o par mais frequente
-            melhor_par = pair_freq.most_common(1)[0][0]
+            maior = max(freq_pares.values())
+            empatados = [p for p, n in freq_pares.items() if n == maior]
+            melhor_par = min(empatados, key=primeira_ocorrencia)
             self.merges.append(melhor_par)
             novo_token = melhor_par[0] + melhor_par[1]
-            self.vocab[novo_token] = len(self.vocab)
-            self.id_to_token[len(self.id_to_token)] = novo_token
+            # Dois merges diferentes podem formar o mesmo texto ("es"+"ta" e
+            # "est"+"a"): o token já existe e mantém o ID
+            if novo_token not in self.vocab:
+                self.id_to_token[len(self.vocab)] = novo_token
+                self.vocab[novo_token] = len(self.vocab)
 
-            # Aplicar merge em todos os chunks
-            for chunk in chunk_splits:
-                chunk_splits[chunk] = self._merge_pair(
-                    chunk_splits[chunk], melhor_par
-                )
+            # Aplicar o merge nos chunks que têm o par e atualizar as contagens
+            tocados: set[tuple[str, str]] = set()
+            for i in list(onde[melhor_par]):
+                antes = pecas[i]
+                depois = self._merge_pair(antes, melhor_par)
+                pares_antes = list(zip(antes, antes[1:]))
+                pares_depois = list(zip(depois, depois[1:]))
+                for par in pares_antes:
+                    freq_pares[par] -= freqs[i]
+                for par in pares_depois:
+                    freq_pares[par] += freqs[i]
+                for par in set(pares_antes).difference(pares_depois):
+                    onde[par].discard(i)
+                for par in pares_depois:
+                    onde[par].add(i)
+                tocados.update(pares_antes)
+                pecas[i] = depois
+            for par in tocados:
+                if freq_pares[par] == 0:
+                    del freq_pares[par], onde[par]
 
         self.vocab_size = len(self.vocab)
+        self._preparar_codificacao()
+
+    def _preparar_codificacao(self) -> None:
+        """Monta a ordem dos merges e esvazia o cache de chunks já codificados."""
+        self._ranks: dict[tuple[str, str], int] = {}
+        for rank, par in enumerate(self.merges):
+            self._ranks.setdefault(par, rank)
+        self._cache: dict[str, list[int]] = {}
 
     @staticmethod
     def _merge_pair(
@@ -186,19 +247,32 @@ class BPETokenizer:
                 i += 1
         return resultado
 
+    def _codificar_chunk(self, chunk: str) -> list[int]:
+        """
+        Aplica os merges num chunk: junta sempre o par aprendido mais cedo
+        que ainda aparece. Dá o mesmo resultado que aplicar os merges um por
+        um, na ordem do treino, mas só olha os pares que o chunk tem.
+        """
+        pieces = list(chunk)
+        sem_rank = len(self.merges)
+        while len(pieces) > 1:
+            par = min(zip(pieces, pieces[1:]), key=lambda p: self._ranks.get(p, sem_rank))
+            if par not in self._ranks:
+                break
+            pieces = self._merge_pair(pieces, par)
+        unk_id = self.vocab.get("<UNK>", 1)
+        return [self.vocab.get(piece, unk_id) for piece in pieces]
+
     def codificar(self, texto: str) -> list[int]:
         """Converte texto em lista de IDs usando BPE."""
-        if not texto:
-            return []
-        chunks = re.findall(r"\S+|\s+", texto)
         ids: list[int] = []
-        unk_id = self.vocab.get("<UNK>", 1)
-        for chunk in chunks:
-            pieces = list(chunk)
-            for merge in self.merges:
-                pieces = self._merge_pair(pieces, merge)
-            for piece in pieces:
-                ids.append(self.vocab.get(piece, unk_id))
+        for chunk in PADRAO_CHUNKS.findall(texto):
+            ids_chunk = self._cache.get(chunk)
+            if ids_chunk is None:
+                ids_chunk = self._codificar_chunk(chunk)
+                if len(self._cache) < TAMANHO_CACHE:
+                    self._cache[chunk] = ids_chunk
+            ids.extend(ids_chunk)
         return ids
 
     def decodificar(self, ids: list[int]) -> str:
@@ -231,6 +305,7 @@ class BPETokenizer:
         tok.vocab = dados["vocab"]
         tok.id_to_token = {int(k): v for k, v in dados["id_to_token"].items()}
         tok.vocab_size = dados["vocab_size"]
+        tok._preparar_codificacao()
         return tok
 
     def __repr__(self) -> str:

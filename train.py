@@ -6,13 +6,16 @@ EXPANDIDO com:
 - Split de validação: avalia o modelo em dados não vistos
 - Early stopping: para o treino se não melhorar por N épocas
 - Tokenizador BPE (ou char, configurável)
+- Texto real já tokenizado pelo `main.py prep` (ver data/preparar.py)
 """
 
 import json
 import math
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data import random_split
@@ -24,25 +27,122 @@ from tokenizer import CharTokenizer, BPETokenizer, criar_tokenizer, carregar_tok
 
 
 class TextDataset(Dataset):
-    """Dataset que transforma texto tokenizado em pares (input, target)."""
+    """
+    Dataset que transforma texto tokenizado em pares (input, target).
 
-    def __init__(self, tokens: list[int], context_len: int):
+    Cada amostra é uma janela de context_len tokens, e uma janela começa a
+    cada `passo` tokens. Com passo 1 entram todas as janelas possíveis (bom
+    pro corpus sintético, que é pequeno); com passo = context_len as janelas
+    não se sobrepõem e uma época passa uma vez por cada token.
+    """
+
+    def __init__(self, tokens: list[int] | np.ndarray, context_len: int, passo: int = 1):
         self.tokens = tokens
         self.context_len = context_len
+        self.passo = passo
 
     def __len__(self) -> int:
-        return max(0, len(self.tokens) - self.context_len)
+        return max(0, (len(self.tokens) - self.context_len - 1) // self.passo + 1)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        chunk = self.tokens[idx : idx + self.context_len + 1]
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        return x, y
+        inicio = idx * self.passo
+        # np.asarray converte tanto a lista quanto o uint16 do memmap
+        chunk = torch.from_numpy(
+            np.asarray(self.tokens[inicio : inicio + self.context_len + 1], dtype=np.int64)
+        )
+        return chunk[:-1], chunk[1:]
 
 
-def get_lr(it: int, config: GPTConfig) -> float:
+def separar_validacao(texto: str, val_split: float) -> tuple[str, str]:
+    """Separa o final do texto (val_split) pra validação, cortando entre duas frases."""
+    if val_split <= 0:
+        return texto, ""
+    corte = texto.find(". ", int(len(texto) * (1 - val_split)))
+    if corte == -1:
+        return texto, ""
+    return texto[: corte + 1], texto[corte + 2 :]
+
+
+def datasets_corpus(
+    config: GPTConfig, texto: str
+) -> tuple[CharTokenizer | BPETokenizer, TextDataset, TextDataset]:
+    """Treina o tokenizer no texto e monta treino (com augmentação) e validação."""
+    print("Construindo tokenizer...")
+    tokenizer = criar_tokenizer(config.tokenizer_type)
+    if isinstance(tokenizer, BPETokenizer):
+        tokenizer.treinar(texto, vocab_size=config.bpe_vocab_size)
+    else:
+        tokenizer.treinar(texto)
+    print(f"  {tokenizer}")
+
+    # ── Split treino/validação ──
+    # Separa o TEXTO antes da augmentação: as cópias permutada e com dropout
+    # saem só do trecho de treino. Se saíssem do corpus inteiro, todas as
+    # frases da validação apareceriam no treino e a val loss não mediria nada.
+    texto_treino, texto_val = separar_validacao(texto, config.val_split)
+
+    # ── Dataset ──
+    tokens = tokenizer.codificar(texto_treino)
+    val_tokens = tokenizer.codificar(texto_val)
+    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens de treino + {len(val_tokens):,} de validação")
+    print(f"  Tokens únicos: {tokenizer.vocab_size}")
+
+    # ── Data augmentation ──
+    # Cria variações do trecho de treino para reduzir overfitting
+    import random as _random
+    _random.seed(42)
+
+    # Permutar frases: embaralha a ordem das frases
+    texto_permutado = permutar_frases(texto_treino)
+    tokens_permutados = tokenizer.codificar(texto_permutado)
+
+    # Augmentação com dropout de tokens
+    texto_augmentado = augmentar_texto(texto_treino, prob_dropout=0.05)
+    tokens_augmentados = tokenizer.codificar(texto_augmentado)
+
+    print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
+
+    # Treino = original (sem val) + permutado + augmentado
+    train_tokens = tokens + tokens_permutados + tokens_augmentados
+    return (
+        tokenizer,
+        TextDataset(train_tokens, config.context_len),
+        TextDataset(val_tokens, config.context_len),
+    )
+
+
+def datasets_preparados(
+    config: GPTConfig, pasta: str
+) -> tuple[BPETokenizer, TextDataset, TextDataset]:
     """
-    Scheduler de learning rate: Warmup + Cosine Decay.
+    Usa o tokenizer e os tokens gravados pelo `main.py prep`.
+
+    Os .bin são abertos com memmap: ficam no disco e só as janelas sorteadas
+    em cada batch são lidas. Não tem augmentação: com milhões de tokens
+    diferentes o modelo não chega a decorar o texto.
+    """
+    pasta_dados = Path(pasta)
+    if not (pasta_dados / "meta.json").exists():
+        raise FileNotFoundError(
+            f"Dados incompletos em {pasta_dados}/ (falta meta.json). Rode antes: python main.py prep"
+        )
+    meta = json.loads((pasta_dados / "meta.json").read_text())
+    tokenizer = carregar_tokenizer(str(pasta_dados / "tokenizer.json"))
+    train_tokens = np.memmap(pasta_dados / "treino.bin", dtype=np.uint16, mode="r")
+    val_tokens = np.memmap(pasta_dados / "val.bin", dtype=np.uint16, mode="r")
+    print(f"  {tokenizer}")
+    print(f"  Dados: {meta['dataset']} → {len(train_tokens):,} tokens de treino + {len(val_tokens):,} de validação")
+    passo = config.context_len
+    return (
+        tokenizer,
+        TextDataset(train_tokens, config.context_len, passo),
+        TextDataset(val_tokens, config.context_len, passo),
+    )
+
+
+def get_lr(it: int, config: GPTConfig, total_passos: int) -> float:
+    """
+    Scheduler de learning rate: Warmup + Cosine Decay até total_passos.
 
     lr │    ___....───────┐
        │   /              ╲
@@ -54,15 +154,38 @@ def get_lr(it: int, config: GPTConfig) -> float:
     if it < config.warmup_steps:
         return config.learning_rate * (it + 1) / config.warmup_steps
 
-    progress = (it - config.warmup_steps) / max(1, 10000 - config.warmup_steps)
+    progress = (it - config.warmup_steps) / max(1, total_passos - config.warmup_steps)
     progress = min(progress, 1.0)
     coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
 
 
+def dtype_amp(config: GPTConfig, device: str) -> torch.dtype | None:
+    """
+    Tipo de 16 bits da precisão mista, ou None pra treinar em fp32.
+
+    A T4 tem tensor cores pra fp16, mas não pra bf16. A partir da Ampere
+    (A100, L4) o bf16 é melhor: tem o mesmo alcance do fp32, então os
+    gradientes não somem e o GradScaler não é necessário.
+    """
+    if device != "cuda" or not config.use_amp:
+        return None
+    return torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
+
+def autocast(amp: torch.dtype | None):
+    """
+    Roda o bloco em precisão mista: as camadas Linear e a atenção calculam
+    em 16 bits, e a cross entropy continua em fp32. O fluxo residual também
+    fica em fp32 (começa no embedding, e fp32 + fp16 dá fp32), então o
+    LayerNorm calcula média e variância em fp32. Sem dtype, não muda nada.
+    """
+    return torch.autocast("cuda", dtype=amp) if amp else nullcontext()
+
+
 @torch.no_grad()
 def avaliar(
-    modelo: GPTModel, dataloader: DataLoader, device: str
+    modelo: GPTModel, dataloader: DataLoader, device: str, amp: torch.dtype | None = None
 ) -> float:
     """Avalia o modelo no dataset de validação. Retorna a loss média."""
     modelo.eval()
@@ -70,7 +193,8 @@ def avaliar(
     n_batches = 0
     for x, y in dataloader:
         x, y = x.to(device), y.to(device)
-        _, loss = modelo(x, y)
+        with autocast(amp):
+            _, loss = modelo(x, y)
         if loss is not None:
             total_loss += loss.item()
             n_batches += 1
@@ -80,12 +204,16 @@ def avaliar(
 
 def treinar(
     config: GPTConfig,
-    texto: str,
+    texto: str | None,
     saida_dir: str = "output",
     device: str | None = None,
+    dados_dir: str | None = None,
 ) -> tuple[GPTModel, CharTokenizer | BPETokenizer]:
     """
     Loop de treinamento completo do MiniGPT.
+
+    Treina no `texto` ou, se `dados_dir` for passado, nos tokens que o
+    `main.py prep` gravou lá (aí `texto` é ignorado).
 
     NOVIDADES:
     - Gradient accumulation (batch efetivo = batch_size * gradient_accum_steps)
@@ -105,45 +233,13 @@ def treinar(
     saida_path = Path(saida_dir)
     saida_path.mkdir(exist_ok=True)
 
-    # ── Tokenizer ──
-    print("Construindo tokenizer...")
-    tokenizer = criar_tokenizer(config.tokenizer_type)
-    if isinstance(tokenizer, BPETokenizer):
-        tokenizer.treinar(texto, vocab_size=config.bpe_vocab_size)
+    # ── Tokenizer e datasets ──
+    if dados_dir:
+        tokenizer, train_dataset, val_dataset = datasets_preparados(config, dados_dir)
     else:
-        tokenizer.treinar(texto)
-    print(f"  {tokenizer}")
+        tokenizer, train_dataset, val_dataset = datasets_corpus(config, texto)
     config.vocab_size = tokenizer.vocab_size
 
-    # ── Dataset ──
-    tokens = tokenizer.codificar(texto)
-    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens")
-    print(f"  Tokens únicos: {tokenizer.vocab_size}")
-
-    # ── Data augmentation ──
-    # Cria variações do corpus para reduzir overfitting
-    import random as _random
-    _random.seed(42)
-
-    # Permutar frases: embaralha a ordem das frases
-    texto_permutado = permutar_frases(texto)
-    tokens_permutados = tokenizer.codificar(texto_permutado)
-
-    # Augmentação com dropout de tokens
-    texto_augmentado = augmentar_texto(texto, prob_dropout=0.05)
-    tokens_augmentados = tokenizer.codificar(texto_augmentado)
-
-    print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
-
-    # Split treino/validação (apenas nos tokens originais)
-    val_size = int(len(tokens) * config.val_split)
-    val_tokens = tokens[-val_size:] if val_size > 0 else None
-
-    # Treino = original (sem val) + permutado + augmentado
-    train_tokens = tokens[:-val_size] if val_size > 0 else tokens
-    train_tokens = train_tokens + tokens_permutados + tokens_augmentados
-
-    train_dataset = TextDataset(train_tokens, config.context_len)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
@@ -153,8 +249,7 @@ def treinar(
     )
 
     val_loader = None
-    if val_tokens and len(val_tokens) > config.context_len:
-        val_dataset = TextDataset(val_tokens, config.context_len)
+    if len(val_dataset) > 0:
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.batch_size,
@@ -163,10 +258,14 @@ def treinar(
             pin_memory=device != "cpu",
         )
 
+    # O cosine decay do LR termina no fim da última época planejada
+    total_passos = math.ceil(len(train_loader) / config.gradient_accum_steps) * config.max_epochs
+
     print(f"  Batch size: {config.batch_size}")
     print(f"  Gradient accumulation: {config.gradient_accum_steps}x")
     print(f"  Batch efetivo: {config.batch_size * config.gradient_accum_steps}")
     print(f"  Batches por época: {len(train_loader)}")
+    print(f"  Passos de otimização: {total_passos:,} em {config.max_epochs} épocas")
     print(f"  Validação: {'Sim' if val_loader else 'Não'}")
 
     # ── Modelo ──
@@ -186,6 +285,27 @@ def treinar(
         betas=(config.beta1, config.beta2),
     )
 
+    # ── Precisão mista ──
+    # Em fp16, gradientes pequenos viram zero. O GradScaler multiplica a loss
+    # antes do backward e desfaz a escala antes do clipping; se aparecer inf,
+    # pula o passo e diminui a escala. Desligado (bf16 ou fp32), não faz nada.
+    amp = dtype_amp(config, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp == torch.float16)
+    precisao = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(amp, "fp32")
+    print(f"  Precisão: {precisao}")
+
+    def passo_otimizador() -> None:
+        nonlocal step_global
+        lr = get_lr(step_global, config, total_passos)
+        for param_group in otimizador.param_groups:
+            param_group["lr"] = lr
+        scaler.unscale_(otimizador)
+        torch.nn.utils.clip_grad_norm_(modelo.parameters(), config.max_grad_norm)
+        scaler.step(otimizador)
+        scaler.update()
+        otimizador.zero_grad(set_to_none=True)
+        step_global += 1
+
     # ── Loop de treino ──
     modelo.train()
     step_global = 0
@@ -197,6 +317,7 @@ def treinar(
 
     total_tokens_treinados = 0
     tempo_inicio = time.time()
+    ultimo_progresso = tempo_inicio
     log_epocas = []
 
     print(f"\nIniciando treino por {config.max_epochs} épocas...")
@@ -214,53 +335,51 @@ def treinar(
             x, y = x.to(device), y.to(device)
 
             # Forward
-            logits, loss = modelo(x, y)
+            with autocast(amp):
+                logits, loss = modelo(x, y)
 
             # Normalizar loss pelo accumulation steps
             loss_norm = loss / config.gradient_accum_steps
-            loss_norm.backward()
+            scaler.scale(loss_norm).backward()
 
             accum_count += 1
             epoca_loss += loss.item()
             n_batches += 1
             total_tokens_treinados += x.shape[0] * x.shape[1]
 
+            # Progresso dentro da época: numa GPU remota uma época pode levar
+            # vários minutos, e sem isso nada aparece no log até ela acabar
+            if time.time() - ultimo_progresso >= 30:
+                ultimo_progresso = time.time()
+                decorrido = ultimo_progresso - tempo_inicio
+                feitos = (epoca - 1) * len(train_loader) + n_batches
+                faltam_min = (len(train_loader) * config.max_epochs - feitos) * decorrido / feitos / 60
+                print(
+                    f"  batch {n_batches:,}/{len(train_loader):,} │ "
+                    f"Loss: {epoca_loss / n_batches:.4f} │ "
+                    f"{total_tokens_treinados / decorrido:,.0f} tokens/s │ "
+                    f"faltam até ~{faltam_min:.0f} min"
+                )
+
             # Backward + update a cada gradient_accum_steps
             if accum_count % config.gradient_accum_steps == 0:
-                lr = get_lr(step_global, config)
-                for param_group in otimizador.param_groups:
-                    param_group["lr"] = lr
-
-                torch.nn.utils.clip_grad_norm_(
-                    modelo.parameters(), config.max_grad_norm
-                )
-                otimizador.step()
-                otimizador.zero_grad(set_to_none=True)
-                step_global += 1
+                passo_otimizador()
 
         # Remanescente de accumulation
         if accum_count % config.gradient_accum_steps != 0:
-            lr = get_lr(step_global, config)
-            for param_group in otimizador.param_groups:
-                param_group["lr"] = lr
-            torch.nn.utils.clip_grad_norm_(
-                modelo.parameters(), config.max_grad_norm
-            )
-            otimizador.step()
-            otimizador.zero_grad(set_to_none=True)
-            step_global += 1
+            passo_otimizador()
 
         media_loss = epoca_loss / max(n_batches, 1)
         elapsed = time.time() - t0
         perplexidade = math.exp(min(media_loss, 20))
 
-        lr_atual = get_lr(step_global, config)
+        lr_atual = get_lr(step_global, config, total_passos)
 
         # Validação
         val_str = ""
         val_loss = None
         if val_loader:
-            val_loss = avaliar(modelo, val_loader, device)
+            val_loss = avaliar(modelo, val_loader, device, amp)
             val_str = f" │ Val Loss: {val_loss:.4f}"
 
         print(
@@ -357,6 +476,7 @@ def treinar(
             "vocab_size": config.vocab_size,
             "tokenizer_type": config.tokenizer_type,
             "use_rope": config.use_rope,
+            "precisao": precisao,
         },
         "device": device,
         "n_params": modelo.contar_parametros(),

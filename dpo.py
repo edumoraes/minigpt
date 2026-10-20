@@ -35,7 +35,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from config import GPTConfig
 from model import GPTModel
-from tokenizer import CharTokenizer, BPETokenizer
+from tokenizer import CharTokenizer, BPETokenizer, EOS_ID
 
 
 class DPODataset(Dataset):
@@ -65,9 +65,9 @@ class DPODataset(Dataset):
             ):
                 continue
 
-            # Targets = shift right
-            chosen_targets = chosen_ids[1:] + [0]
-            rejected_targets = rejected_ids[1:] + [0]
+            # Targets = shift right terminando em <EOS> (igual ao SFT)
+            chosen_targets = chosen_ids[1:] + [EOS_ID]
+            rejected_targets = rejected_ids[1:] + [EOS_ID]
 
             self.samples.append({
                 "chosen_ids": chosen_ids,
@@ -81,24 +81,32 @@ class DPODataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
-        sample = self.samples[idx]
-        max_len = self.context_len
+        return self.samples[idx]
 
-        # Pad to same length within the pair
-        chosen_len = len(sample["chosen_ids"])
-        rejected_len = len(sample["rejected_ids"])
-        pair_max = max(chosen_len, rejected_len, 1)
 
-        def pad_seq(seq, target_len, pad_val=0):
-            return seq[:target_len] + [pad_val] * max(0, target_len - len(seq))
+def _dpo_collate(batch: list[dict]) -> dict[str, torch.Tensor]:
+    """
+    Pad do batch inteiro até a maior sequência (chosen ou rejected).
 
-        return {
-            "chosen_ids": torch.tensor(pad_seq(sample["chosen_ids"], pair_max), dtype=torch.long),
-            "chosen_targets": torch.tensor(pad_seq(sample["chosen_targets"], pair_max, -100), dtype=torch.long),
-            "rejected_ids": torch.tensor(pad_seq(sample["rejected_ids"], pair_max), dtype=torch.long),
-            "rejected_targets": torch.tensor(pad_seq(sample["rejected_targets"], pair_max, -100), dtype=torch.long),
-            "prompt_len": sample["prompt_len"],
-        }
+    O collate padrão do DataLoader exige tensores do mesmo tamanho, e cada
+    par tem um comprimento diferente.
+    """
+    max_len = max(
+        max(len(s["chosen_ids"]), len(s["rejected_ids"])) for s in batch
+    )
+
+    def pad(chave: str, pad_val: int) -> torch.Tensor:
+        return torch.tensor(
+            [s[chave] + [pad_val] * (max_len - len(s[chave])) for s in batch],
+            dtype=torch.long,
+        )
+
+    return {
+        "chosen_ids": pad("chosen_ids", 0),
+        "chosen_targets": pad("chosen_targets", -100),
+        "rejected_ids": pad("rejected_ids", 0),
+        "rejected_targets": pad("rejected_targets", -100),
+    }
 
 
 def _get_log_probs(
@@ -110,10 +118,12 @@ def _get_log_probs(
     logits, _ = modelo(input_ids, targets)
     # logits: (B, T, V), targets: (B, T)
     log_probs = F.log_softmax(logits, dim=-1)
-    # Pegar log-prob do token target
-    token_log_probs = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
-    # Máscara: ignorar -100
+    # Máscara: ignorar -100 (padding)
     mask = targets != -100
+    # Pegar log-prob do token target. O gather não aceita índice -100, então
+    # o padding usa o índice 0 e a máscara zera essas posições depois.
+    indices = targets.masked_fill(~mask, 0).unsqueeze(-1)
+    token_log_probs = log_probs.gather(2, indices).squeeze(-1)
     return (token_log_probs * mask).sum(dim=-1)
 
 
@@ -176,6 +186,7 @@ def treinar_dpo(
         shuffle=True,
         num_workers=0,
         pin_memory=device != "cpu",
+        collate_fn=_dpo_collate,
     )
     print(f"  Amostras DPO válidas: {len(dataset)}")
 
