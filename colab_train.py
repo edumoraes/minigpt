@@ -6,11 +6,11 @@ Usa o colab CLI (https://github.com/googlecolab/google-colab-cli):
 1. cria uma máquina nova (T4 por padrão)
 2. envia os arquivos do repositório como estão no seu computador,
    incluindo mudanças ainda não commitadas (o que está no .gitignore fica de fora)
-3. roda as etapas do main.py em segundo plano e mostra o log a cada 20s
+3. roda as etapas do main.py na máquina e mostra o log a cada 20s
 4. baixa o que foi gerado em output/ e desliga a máquina
 
-A máquina é desligada mesmo se der erro ou se você apertar Ctrl+C. Nesse
-caso, o melhor modelo salvo até ali também é baixado.
+A máquina é desligada mesmo se der erro, se você apertar Ctrl+C ou se o
+terminal for fechado. Nesses casos, o melhor modelo salvo até ali também é baixado.
 
 USO:
   python colab_train.py                                    # train → sft → dpo → sample numa T4
@@ -26,6 +26,7 @@ PRÉ-REQUISITO (uma vez):
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import signal
@@ -41,33 +42,36 @@ RAIZ = Path(__file__).resolve().parent
 REMOTO = "/content/minigpt"
 LOG_REMOTO = f"{REMOTO}/treino.log"
 MARCA_FIM = "@@fim "
+MARCA_AMBIENTE = "@@ambiente "
 INTERVALO_SEG = 20
-MAX_FALHAS_SEGUIDAS = 6  # ~2 min sem conseguir ler o log
+MAX_FALHAS_SEGUIDAS = 9  # ~3 min sem conseguir ler o log
 ETAPAS_VALIDAS = {"train", "sft", "dpo", "sample", "info"}
 
-# Roda no kernel: troca o código antigo pelo pacote enviado e mostra o ambiente
-CODIGO_PREPARAR = f"""
-import os, shutil, tarfile, torch
-shutil.rmtree("{REMOTO}", ignore_errors=True)
-with tarfile.open("{REMOTO}.tgz") as pacote:
-    pacote.extractall("{REMOTO}", **({{"filter": "data"}} if hasattr(tarfile, "data_filter") else {{}}))
-os.remove("{REMOTO}.tgz")
+# Roda no kernel como o primeiro e único exec da máquina: troca o código antigo
+# pelo pacote enviado e executa as etapas, com tudo indo pro log. Um segundo
+# exec reconecta a um kernel já existente, e essa reconexão travou duas vezes
+# numa T4 longe daqui (o websocket levou ~20 s e o código nunca foi enviado).
+# O kernel fica ocupado até o fim, o que mostra pro Colab que a máquina está em uso.
+CODIGO_RODAR = """
+import os, shutil, subprocess, tarfile, torch
+shutil.rmtree("{remoto}", ignore_errors=True)
+with tarfile.open("{remoto}.tgz") as pacote:
+    pacote.extractall("{remoto}", **({{"filter": "data"}} if hasattr(tarfile, "data_filter") else {{}}))
+os.remove("{remoto}.tgz")
 gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "nenhuma"
-print(f"@@ambiente torch {{torch.__version__}} | GPU: {{gpu}}")
-"""
-
-# Roda no kernel: executa as etapas com a saída indo pro log. O kernel fica
-# ocupado até o fim, o que mantém a máquina ativa mesmo se a conexão cair.
-CODIGO_TREINAR = """
-import os, subprocess
 with open("{log}", "w") as log:
-    r = subprocess.run(
-        ["bash", "-c", {script}], cwd="{remoto}",
-        stdout=log, stderr=subprocess.STDOUT,
-        env={{**os.environ, "PYTHONUNBUFFERED": "1"}},
-    )
+    log.write(f"{ambiente}torch {{torch.__version__}} | GPU: {{gpu}}\\n")
+    log.flush()
+    if {exige_gpu} and gpu == "nenhuma":
+        log.write("A máquina veio sem GPU visível pro PyTorch\\n")
+        codigo = 3
+    else:
+        codigo = subprocess.run(
+            ["bash", "-c", {script}], cwd="{remoto}", stdout=log, stderr=subprocess.STDOUT,
+            env={{**os.environ, "PYTHONUNBUFFERED": "1"}},
+        ).returncode
 with open("{log}", "a") as log:
-    log.write(f"\\n{marca}{{r.returncode}}\\n")
+    log.write(f"\\n{marca}{{codigo}}\\n")
 """
 
 
@@ -108,19 +112,36 @@ def montar_script(etapas: list[str]) -> str:
     return "\n".join(linhas)
 
 
+def iniciar(sessao: str, etapas: list[str], exige_gpu: bool) -> subprocess.Popen:
+    """Dispara o exec que prepara a máquina e roda as etapas; ele fica conectado até o fim."""
+    codigo = CODIGO_RODAR.format(
+        remoto=REMOTO, log=LOG_REMOTO, ambiente=MARCA_AMBIENTE, marca=MARCA_FIM,
+        exige_gpu=exige_gpu, script=json.dumps(montar_script(etapas)),
+    )
+    # O progresso vem do log, então a saída do exec é descartada
+    treino = subprocess.Popen(
+        ["colab", "exec", "-s", sessao, "--timeout", "86400"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
+    )
+    treino.stdin.write(codigo)
+    treino.stdin.close()
+    return treino
+
+
 def acompanhar(sessao: str, pasta_tmp: Path) -> int:
-    """Baixa o log periodicamente, mostra as linhas novas e devolve o código de saída."""
+    """Baixa o log a cada INTERVALO_SEG, mostra as linhas novas e devolve o código de saída."""
     log_local = pasta_tmp / "treino.log"
     impresso = 0
     falhas = 0
     while True:
         time.sleep(INTERVALO_SEG)
+        # O download usa a API de arquivos, que não passa pelo kernel
         r = colab("download", "-s", sessao, LOG_REMOTO, str(log_local), capturar=True, timeout=120)
         if r.returncode != 0:
             falhas += 1
             if falhas >= MAX_FALHAS_SEGUIDAS:
                 raise RuntimeError(
-                    "Não consegui ler o log da máquina por ~2 min. "
+                    f"Não consegui ler o log da máquina por ~{falhas * INTERVALO_SEG // 60} min. "
                     "Ela pode ter sido desligada pelo Colab (veja `colab sessions`)."
                 )
             continue
@@ -134,6 +155,10 @@ def acompanhar(sessao: str, pasta_tmp: Path) -> int:
         for linha in novo.splitlines(keepends=True):
             if linha.startswith(MARCA_FIM):
                 return int(linha[len(MARCA_FIM):])
+            if linha.startswith(MARCA_AMBIENTE):
+                print(f"  {linha.removeprefix(MARCA_AMBIENTE).strip()}")
+                mostrar_custo()
+                continue
             sys.stdout.write(linha)
         sys.stdout.flush()
 
@@ -164,6 +189,14 @@ def baixar_resultados(sessao: str, saida: Path) -> None:
         print(f"  {'✓' if r.returncode == 0 else '✗'} {local}")
 
 
+def interromper(sinal: int, _quadro) -> None:
+    """kill (SIGTERM) e terminal fechado (SIGHUP) seguem o mesmo caminho do Ctrl+C."""
+    if sinal == signal.SIGHUP:
+        # Sem terminal, um print daria erro e pularia o desligamento da máquina
+        sys.stdout = sys.stderr = open(os.devnull, "w")
+    raise KeyboardInterrupt
+
+
 def verificar_sessao_livre(sessao: str) -> None:
     """Sai com erro se o login falhar ou se já existir uma sessão com esse nome."""
     r = colab("sessions", capturar=True, timeout=120)
@@ -172,17 +205,6 @@ def verificar_sessao_livre(sessao: str) -> None:
     # Linhas no formato "[nome] endpoint | Hardware: ..."
     if any(linha.startswith(f"[{sessao}] ") for linha in r.stdout.splitlines()):
         sys.exit(f"Já existe uma sessão '{sessao}'. Use --sessao outro_nome ou `colab stop -s {sessao}`.")
-
-
-def preparar_maquina(sessao: str, pacote: Path) -> str:
-    """Envia o pacote, troca o código antigo por ele e devolve a descrição do ambiente."""
-    if colab("upload", "-s", sessao, str(pacote), f"{REMOTO}.tgz", capturar=True).returncode != 0:
-        raise RuntimeError("Falha ao enviar o pacote pra máquina")
-    r = colab("exec", "-s", sessao, "--timeout", "300", entrada=CODIGO_PREPARAR, capturar=True)
-    ambiente = next((l for l in r.stdout.splitlines() if l.startswith("@@ambiente ")), None)
-    if r.returncode != 0 or ambiente is None:
-        raise RuntimeError(f"Falha ao preparar a máquina:\n{r.stdout}{r.stderr}")
-    return ambiente.removeprefix("@@ambiente ")
 
 
 def mostrar_custo() -> None:
@@ -194,23 +216,6 @@ def mostrar_custo() -> None:
         taxa = uso["Usage rate"].strip().removesuffix("/hr")
         saldo = uso.get("Current balance", "?").strip().removesuffix(" compute units")
         print(f"  Custo: {taxa} unidades/hora | saldo: {saldo} unidades")
-
-
-def iniciar_treino(sessao: str, etapas: list[str]) -> subprocess.Popen:
-    """Começa as etapas no kernel e devolve o processo do exec, que fica conectado."""
-    codigo = CODIGO_TREINAR.format(
-        log=LOG_REMOTO, remoto=REMOTO, marca=MARCA_FIM,
-        script=json.dumps(montar_script(etapas)),
-    )
-    # O exec fica conectado durante todo o treino só pra manter o kernel
-    # ocupado; o progresso vem do log, então a saída dele é descartada.
-    treino = subprocess.Popen(
-        ["colab", "exec", "-s", sessao, "--timeout", "86400"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
-    )
-    treino.stdin.write(codigo)
-    treino.stdin.close()
-    return treino
 
 
 def main() -> int:
@@ -251,6 +256,8 @@ def main() -> int:
     treino = None
     codigo = 1
     inicio = time.time()
+    signal.signal(signal.SIGTERM, interromper)
+    signal.signal(signal.SIGHUP, interromper)
 
     try:
         print("[1/4] Empacotando o repositório")
@@ -266,15 +273,11 @@ def main() -> int:
             print("Não foi possível criar a máquina. Sem cota pra essa GPU? Tente --gpu T4 ou --cpu.")
             return 1
         criou = True
-
-        ambiente = preparar_maquina(args.sessao, pacote)
-        print(f"  {ambiente}")
-        if not args.cpu and "GPU: nenhuma" in ambiente:
-            raise RuntimeError("A máquina veio sem GPU visível pro PyTorch")
-        mostrar_custo()
+        if colab("upload", "-s", args.sessao, str(pacote), f"{REMOTO}.tgz", capturar=True).returncode != 0:
+            raise RuntimeError("Falha ao enviar o pacote pra máquina")
 
         print(f"[3/4] Rodando: {' → '.join(args.etapas)}  (Ctrl+C interrompe e desliga)")
-        treino = iniciar_treino(args.sessao, args.etapas)
+        treino = iniciar(args.sessao, args.etapas, exige_gpu=not args.cpu)
         codigo = acompanhar(args.sessao, pasta_tmp)
         print(f"Etapas {'concluídas' if codigo == 0 else f'falharam (código {codigo})'}"
               f" em {(time.time() - inicio) / 60:.1f} min")
@@ -286,8 +289,9 @@ def main() -> int:
         print(f"\nErro: {e}")
         codigo = 1
     finally:
-        # Um segundo Ctrl+C aqui deixaria a máquina ligada gastando unidades
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # Um segundo Ctrl+C (ou kill) aqui deixaria a máquina ligada gastando unidades
+        for sinal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sinal, signal.SIG_IGN)
         if treino and treino.poll() is None:
             treino.terminate()
         if criou:
