@@ -6,6 +6,7 @@ EXPANDIDO com:
 - Split de validação: avalia o modelo em dados não vistos
 - Early stopping: para o treino se não melhorar por N épocas
 - Tokenizador BPE (ou char, configurável)
+- Texto real já tokenizado pelo `main.py prep` (ver data/preparar.py)
 """
 
 import json
@@ -13,6 +14,7 @@ import math
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.utils.data import random_split
@@ -24,20 +26,30 @@ from tokenizer import CharTokenizer, BPETokenizer, criar_tokenizer, carregar_tok
 
 
 class TextDataset(Dataset):
-    """Dataset que transforma texto tokenizado em pares (input, target)."""
+    """
+    Dataset que transforma texto tokenizado em pares (input, target).
 
-    def __init__(self, tokens: list[int], context_len: int):
+    Cada amostra é uma janela de context_len tokens, e uma janela começa a
+    cada `passo` tokens. Com passo 1 entram todas as janelas possíveis (bom
+    pro corpus sintético, que é pequeno); com passo = context_len as janelas
+    não se sobrepõem e uma época passa uma vez por cada token.
+    """
+
+    def __init__(self, tokens: list[int] | np.ndarray, context_len: int, passo: int = 1):
         self.tokens = tokens
         self.context_len = context_len
+        self.passo = passo
 
     def __len__(self) -> int:
-        return max(0, len(self.tokens) - self.context_len)
+        return max(0, (len(self.tokens) - self.context_len - 1) // self.passo + 1)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        chunk = self.tokens[idx : idx + self.context_len + 1]
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        return x, y
+        inicio = idx * self.passo
+        # np.asarray converte tanto a lista quanto o uint16 do memmap
+        chunk = torch.from_numpy(
+            np.asarray(self.tokens[inicio : inicio + self.context_len + 1], dtype=np.int64)
+        )
+        return chunk[:-1], chunk[1:]
 
 
 def separar_validacao(texto: str, val_split: float) -> tuple[str, str]:
@@ -48,6 +60,83 @@ def separar_validacao(texto: str, val_split: float) -> tuple[str, str]:
     if corte == -1:
         return texto, ""
     return texto[: corte + 1], texto[corte + 2 :]
+
+
+def datasets_corpus(
+    config: GPTConfig, texto: str
+) -> tuple[CharTokenizer | BPETokenizer, TextDataset, TextDataset]:
+    """Treina o tokenizer no texto e monta treino (com augmentação) e validação."""
+    print("Construindo tokenizer...")
+    tokenizer = criar_tokenizer(config.tokenizer_type)
+    if isinstance(tokenizer, BPETokenizer):
+        tokenizer.treinar(texto, vocab_size=config.bpe_vocab_size)
+    else:
+        tokenizer.treinar(texto)
+    print(f"  {tokenizer}")
+
+    # ── Split treino/validação ──
+    # Separa o TEXTO antes da augmentação: as cópias permutada e com dropout
+    # saem só do trecho de treino. Se saíssem do corpus inteiro, todas as
+    # frases da validação apareceriam no treino e a val loss não mediria nada.
+    texto_treino, texto_val = separar_validacao(texto, config.val_split)
+
+    # ── Dataset ──
+    tokens = tokenizer.codificar(texto_treino)
+    val_tokens = tokenizer.codificar(texto_val)
+    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens de treino + {len(val_tokens):,} de validação")
+    print(f"  Tokens únicos: {tokenizer.vocab_size}")
+
+    # ── Data augmentation ──
+    # Cria variações do trecho de treino para reduzir overfitting
+    import random as _random
+    _random.seed(42)
+
+    # Permutar frases: embaralha a ordem das frases
+    texto_permutado = permutar_frases(texto_treino)
+    tokens_permutados = tokenizer.codificar(texto_permutado)
+
+    # Augmentação com dropout de tokens
+    texto_augmentado = augmentar_texto(texto_treino, prob_dropout=0.05)
+    tokens_augmentados = tokenizer.codificar(texto_augmentado)
+
+    print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
+
+    # Treino = original (sem val) + permutado + augmentado
+    train_tokens = tokens + tokens_permutados + tokens_augmentados
+    return (
+        tokenizer,
+        TextDataset(train_tokens, config.context_len),
+        TextDataset(val_tokens, config.context_len),
+    )
+
+
+def datasets_preparados(
+    config: GPTConfig, pasta: str
+) -> tuple[BPETokenizer, TextDataset, TextDataset]:
+    """
+    Usa o tokenizer e os tokens gravados pelo `main.py prep`.
+
+    Os .bin são abertos com memmap: ficam no disco e só as janelas sorteadas
+    em cada batch são lidas. Não tem augmentação: com milhões de tokens
+    diferentes o modelo não chega a decorar o texto.
+    """
+    pasta_dados = Path(pasta)
+    if not (pasta_dados / "meta.json").exists():
+        raise FileNotFoundError(
+            f"Dados incompletos em {pasta_dados}/ (falta meta.json). Rode antes: python main.py prep"
+        )
+    meta = json.loads((pasta_dados / "meta.json").read_text())
+    tokenizer = carregar_tokenizer(str(pasta_dados / "tokenizer.json"))
+    train_tokens = np.memmap(pasta_dados / "treino.bin", dtype=np.uint16, mode="r")
+    val_tokens = np.memmap(pasta_dados / "val.bin", dtype=np.uint16, mode="r")
+    print(f"  {tokenizer}")
+    print(f"  Dados: {meta['dataset']} → {len(train_tokens):,} tokens de treino + {len(val_tokens):,} de validação")
+    passo = config.context_len
+    return (
+        tokenizer,
+        TextDataset(train_tokens, config.context_len, passo),
+        TextDataset(val_tokens, config.context_len, passo),
+    )
 
 
 def get_lr(it: int, config: GPTConfig, total_passos: int) -> float:
@@ -90,12 +179,16 @@ def avaliar(
 
 def treinar(
     config: GPTConfig,
-    texto: str,
+    texto: str | None,
     saida_dir: str = "output",
     device: str | None = None,
+    dados_dir: str | None = None,
 ) -> tuple[GPTModel, CharTokenizer | BPETokenizer]:
     """
     Loop de treinamento completo do MiniGPT.
+
+    Treina no `texto` ou, se `dados_dir` for passado, nos tokens que o
+    `main.py prep` gravou lá (aí `texto` é ignorado).
 
     NOVIDADES:
     - Gradient accumulation (batch efetivo = batch_size * gradient_accum_steps)
@@ -115,47 +208,13 @@ def treinar(
     saida_path = Path(saida_dir)
     saida_path.mkdir(exist_ok=True)
 
-    # ── Tokenizer ──
-    print("Construindo tokenizer...")
-    tokenizer = criar_tokenizer(config.tokenizer_type)
-    if isinstance(tokenizer, BPETokenizer):
-        tokenizer.treinar(texto, vocab_size=config.bpe_vocab_size)
+    # ── Tokenizer e datasets ──
+    if dados_dir:
+        tokenizer, train_dataset, val_dataset = datasets_preparados(config, dados_dir)
     else:
-        tokenizer.treinar(texto)
-    print(f"  {tokenizer}")
+        tokenizer, train_dataset, val_dataset = datasets_corpus(config, texto)
     config.vocab_size = tokenizer.vocab_size
 
-    # ── Split treino/validação ──
-    # Separa o TEXTO antes da augmentação: as cópias permutada e com dropout
-    # saem só do trecho de treino. Se saíssem do corpus inteiro, todas as
-    # frases da validação apareceriam no treino e a val loss não mediria nada.
-    texto_treino, texto_val = separar_validacao(texto, config.val_split)
-
-    # ── Dataset ──
-    tokens = tokenizer.codificar(texto_treino)
-    val_tokens = tokenizer.codificar(texto_val)
-    print(f"  Corpus: {len(texto):,} caracteres → {len(tokens):,} tokens de treino + {len(val_tokens):,} de validação")
-    print(f"  Tokens únicos: {tokenizer.vocab_size}")
-
-    # ── Data augmentation ──
-    # Cria variações do trecho de treino para reduzir overfitting
-    import random as _random
-    _random.seed(42)
-
-    # Permutar frases: embaralha a ordem das frases
-    texto_permutado = permutar_frases(texto_treino)
-    tokens_permutados = tokenizer.codificar(texto_permutado)
-
-    # Augmentação com dropout de tokens
-    texto_augmentado = augmentar_texto(texto_treino, prob_dropout=0.05)
-    tokens_augmentados = tokenizer.codificar(texto_augmentado)
-
-    print(f"  Augmentação: +{len(tokens_permutados):,} tokens (permutação) +{len(tokens_augmentados):,} tokens (dropout)")
-
-    # Treino = original (sem val) + permutado + augmentado
-    train_tokens = tokens + tokens_permutados + tokens_augmentados
-
-    train_dataset = TextDataset(train_tokens, config.context_len)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
@@ -165,8 +224,7 @@ def treinar(
     )
 
     val_loader = None
-    if val_tokens and len(val_tokens) > config.context_len:
-        val_dataset = TextDataset(val_tokens, config.context_len)
+    if len(val_dataset) > 0:
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.batch_size,

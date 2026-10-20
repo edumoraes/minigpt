@@ -2,6 +2,7 @@
 main.py — CLI interativa do MiniGPT
 
 COMANDOS:
+  python main.py prep      # Baixa e tokeniza texto real (opcional)
   python main.py train     # Pré-treinamento
   python main.py sft       # Supervised Fine-Tuning
   python main.py dpo       # Direct Preference Optimization
@@ -10,7 +11,8 @@ COMANDOS:
   python main.py info      # Info do modelo salvo
 
 FLUXO COMPLETO:
-  1. train  → pré-treina no corpus (salva melhor_modelo.pt)
+  0. prep   → (opcional) grava texto real tokenizado em dados/
+  1. train  → pré-treina no corpus (ou em dados/ com --dados; salva melhor_modelo.pt)
   2. sft    → fine-tune com instruções (salva melhor_modelo_sft.pt)
   3. dpo    → alinha com preferências (salva melhor_modelo_dpo.pt)
   4. chat   → conversa com modelo treinado
@@ -78,18 +80,42 @@ def carregar_modelo(
     return modelo, tokenizer, device
 
 
+def _quantidade(valor: str) -> int:
+    """Número inteiro, aceitando sufixo: 150M, 1.5B, 500K."""
+    mult = {"K": 10**3, "M": 10**6, "B": 10**9}.get(valor[-1:].upper())
+    return int(float(valor[:-1]) * mult) if mult else int(valor)
+
+
+def cmd_prep(args):
+    """Baixa o começo do GigaVerbo-v2 (edu_high) e grava os tokens em disco."""
+    from data.preparar import preparar
+
+    preparar(args.saida, n_tokens=args.tokens, vocab_size=args.vocab)
+
+
 def cmd_train(args):
     """Pré-treinamento no corpus."""
     from data.corpus import carregar_corpus, carregar_corpus_externo
 
     config = GPTConfig()
 
-    # Sobrescrever config com argumentos do CLI
-    if args.corpus:
+    texto = None
+    if args.dados:
+        if args.tokenizer:
+            sys.exit("--tokenizer não vale com --dados: o tokenizer vem do prep")
+        # Texto real: modelo maior, sem dropout (com tantos tokens diferentes
+        # ele não chega a decorar) e uma época, que já passa por todos os tokens
+        config.d_model = 256
+        config.n_layers = 6
+        config.dropout = 0.0
+        config.weight_decay = 0.1
+        config.max_epochs = 1
+    elif args.corpus:
         texto = carregar_corpus_externo(args.corpus)
     else:
         texto = carregar_corpus()
 
+    # Sobrescrever config com argumentos do CLI
     if args.d_model:
         config.d_model = args.d_model
     if args.n_layers:
@@ -111,11 +137,11 @@ def cmd_train(args):
     print(f"  d_model={config.d_model}, n_heads={config.n_heads}, "
           f"n_layers={config.n_layers}")
     print(f"  context_len={config.context_len}, batch_size={config.batch_size}")
-    print(f"  lr={config.learning_rate}, epochs={config.max_epochs}")
+    print(f"  lr={config.learning_rate}, epochs={config.max_epochs}, dropout={config.dropout}")
     print(f"  tokenizer={config.tokenizer_type}, RoPE={config.use_rope}")
     print(f"  gradient_accum={config.gradient_accum_steps}\n")
 
-    modelo, tokenizer = treinar(config, texto, saida_dir="output")
+    modelo, tokenizer = treinar(config, texto, saida_dir="output", dados_dir=args.dados)
 
     # Demo pós-treino
     print("\n" + "=" * 60)
@@ -385,6 +411,8 @@ def main():
         epilog="""
 Exemplos:
   python main.py train                  # Pré-treinamento
+  python main.py prep --tokens 150M     # Texto real (GigaVerbo-v2) em dados/
+  python main.py train --dados dados    # Pré-treino nesse texto
   python main.py train --corpus data.txt  # Corpus externo
   python main.py train --d_model 256    # Modelo maior
   python main.py sft                    # Fine-tuning supervisionado
@@ -396,9 +424,20 @@ Exemplos:
     )
     subparsers = parser.add_subparsers(dest="comando", help="Comando disponível")
 
+    # ── prep ──
+    p_prep = subparsers.add_parser("prep", help="Baixa e tokeniza texto real (GigaVerbo-v2 edu_high)")
+    p_prep.add_argument("--tokens", type=_quantidade, default=150_000_000,
+                        help="Tokens de treino, ex.: 150M (padrão); a validação leva 1%% a mais")
+    p_prep.add_argument("--vocab", type=int, default=8192, help="Tamanho do vocabulário BPE (padrão: 8192)")
+    p_prep.add_argument("--saida", default="dados", help="Pasta de saída (padrão: dados)")
+
     # ── train ──
     p_train = subparsers.add_parser("train", help="Pré-treinamento")
-    p_train.add_argument("--corpus", type=str, help="Caminho para corpus externo")
+    fonte = p_train.add_mutually_exclusive_group()
+    fonte.add_argument("--corpus", type=str, help="Caminho para corpus externo")
+    fonte.add_argument("--dados", type=str,
+                       help="Pasta gravada pelo prep. Muda o padrão pra d_model 256, "
+                            "6 camadas, dropout 0 e 1 época")
     p_train.add_argument("--d_model", type=int, help="Dimensão do modelo")
     p_train.add_argument("--n_layers", type=int, help="Número de camadas")
     p_train.add_argument("--context_len", type=int, help="Janela de contexto")
@@ -436,6 +475,7 @@ Exemplos:
         return
 
     comandos = {
+        "prep": cmd_prep,
         "train": cmd_train,
         "sft": cmd_sft,
         "dpo": cmd_dpo,

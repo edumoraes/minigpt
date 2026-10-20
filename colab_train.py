@@ -15,6 +15,7 @@ terminal for fechado. Nesses casos, o melhor modelo salvo até ali também é ba
 USO:
   python colab_train.py                                    # train → sft → dpo → sample numa T4
   python colab_train.py --etapas "train --epochs 3" sft dpo sample
+  python colab_train.py --etapas prep "train --dados dados" sft dpo sample  # texto real
   python colab_train.py --gpu L4
   python colab_train.py --cpu --etapas "train --epochs 1"  # teste barato, sem GPU
   python colab_train.py --manter                           # deixa a máquina ligada no fim
@@ -45,7 +46,7 @@ MARCA_FIM = "@@fim "
 MARCA_AMBIENTE = "@@ambiente "
 INTERVALO_SEG = 20
 MAX_FALHAS_SEGUIDAS = 9  # ~3 min sem conseguir ler o log
-ETAPAS_VALIDAS = {"train", "sft", "dpo", "sample", "info"}
+ETAPAS_VALIDAS = {"prep", "train", "sft", "dpo", "sample", "info"}
 
 # Roda no kernel como o primeiro e único exec da máquina: troca o código antigo
 # pelo pacote enviado e executa as etapas, com tudo indo pro log. Um segundo
