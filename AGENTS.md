@@ -14,7 +14,7 @@ python main.py chat     # Interactive chat (needs a TTY)
 python main.py info     # Inspect a saved checkpoint
 ```
 
-`train` must run before the others. It accepts overrides: `--epochs`, `--batch_size`, `--context_len`, `--d_model`, `--n_layers`, `--accum`, `--tokenizer {bpe,char}`, `--no-rope`, `--corpus FILE` or `--dados DIR`. `--dados` switches the defaults to d_model 256, 6 layers, dropout 0, weight decay 0.1 and 1 epoch (~6.8M params at vocab 8192); the flags still override them. `prep` takes `--tokens` (accepts `150M`), `--vocab` (default 8192) and `--saida`.
+`train` must run before the others. It accepts overrides: `--epochs`, `--batch_size`, `--context_len`, `--d_model`, `--n_layers`, `--accum`, `--tokenizer {bpe,char}`, `--no-rope`, `--no-amp`, `--corpus FILE` or `--dados DIR`. `--dados` switches the defaults to d_model 256, 6 layers, dropout 0, weight decay 0.1 and 1 epoch (~6.8M params at vocab 8192); the flags still override them. `prep` takes `--tokens` (accepts `150M`), `--vocab` (default 8192) and `--saida`.
 
 ## Training on Colab
 
@@ -32,7 +32,7 @@ python colab_train.py --manter                            # keep the VM: colab c
 
 Everything on the VM runs inside its first `colab exec`. A later exec reattaches to the existing kernel, and on far-away T4s (europe-west4, asia-southeast1) that reattach hung twice with colab CLI 0.7.4: the websocket took ~20 s and the code was never sent. Don't split the work into several execs.
 
-Cost: an epoch covers every sliding window of `context_len` tokens over ~413k tokens (the train split plus two augmented copies), ~12.9k batches at batch_size 32. On a T4 (~590k tokens/s, 1.07 compute units/hour in Oct 2026) that is ~3 min per epoch: `--etapas "train --epochs 3" sft dpo sample` took 10.6 min, and the default 30 epochs would take ~1.5 h. `train` prints throughput and an upper-bound ETA every 30 s. With `--dados` an epoch is `--tokens / context_len` windows (150M tokens → 18.3k batches at batch_size 32). The 6.8M-param preset runs at ~47k tokens/s on a T4 (fp32, no AMP), so `--etapas prep "train --dados dados" sft dpo sample` took 60.7 min and 1.03 units: prep 6.6 min, train 52.9 min (val loss 2.65), the rest ~1 min.
+Cost: an epoch covers every sliding window of `context_len` tokens over ~413k tokens (the train split plus two augmented copies), ~12.9k batches at batch_size 32. On a T4 (~590k tokens/s, 1.07 compute units/hour in Oct 2026) that is ~3 min per epoch: `--etapas "train --epochs 3" sft dpo sample` took 10.6 min, and the default 30 epochs would take ~1.5 h. `train` prints throughput and an upper-bound ETA every 30 s. With `--dados` an epoch is `--tokens / context_len` windows (150M tokens → 18.3k batches at batch_size 32). In fp32 (`--no-amp`) the 6.8M-param preset runs at ~47-52k tokens/s on a T4: `--etapas prep "train --dados dados" sft dpo sample` took 60.7 min and 1.03 units, with prep 6.6 min, train 52.9 min (val loss 2.65) and the rest ~1 min. fp16, the default on a T4, runs at ~108k tokens/s: on the same VM with 10M tokens, train took 92 s against 193 s in fp32, with val loss 3.935 against 3.928. That puts 150M tokens at ~23 min.
 
 ## Dependencies
 
@@ -49,7 +49,7 @@ No build step, no test suite, no linter configured.
 | `main.py` | CLI entrypoint (argparse subcommands) |
 | `config.py` | All hyperparams in `GPTConfig` dataclass |
 | `model.py` | GPT from scratch: LayerNorm, attention with RoPE + `F.scaled_dot_product_attention`, FeedForward, TransformerBlock, GPTModel |
-| `train.py` | Pre-training: train/val split, augmentation, warmup + cosine LR over the planned steps, early stopping, checkpoints |
+| `train.py` | Pre-training: train/val split, augmentation, warmup + cosine LR over the planned steps, mixed precision on CUDA, early stopping, checkpoints |
 | `sft.py` | Supervised fine-tuning: loss only on response tokens, targets end in `<EOS>` |
 | `dpo.py` | Direct Preference Optimization against a frozen copy of the model |
 | `generate.py` | Sampling (temperature, top-k, top-p, repetition penalty, typical) and beam search |
@@ -63,6 +63,7 @@ No build step, no test suite, no linter configured.
 - **Real data (`dados/`)**: `prep` reads the parquet files through `HfFileSystem`, which only downloads the row groups it reads (22 per file, ~14k docs and ~84M chars each, ~9 s per row group from a home connection), so 150M tokens come from ~5 row groups of the first file. The BPE trains on the first 10M chars (~2 min at vocab 8192 on the Colab VM, including the first row group read). The first docs fill `val.bin` (1% of `--tokens`), the next ones `treino.bin`: uint16 ids with `<EOS>` after each doc. `meta.json` is written last, and `train --dados` refuses to start without it. `train` reads the `.bin` through `np.memmap` with non-overlapping windows (one epoch sees each token once) and no augmentation. The text mixes PT-BR and PT-PT (FineWeb-2 and mC4).
 - **Tokenizer**: BPE pre-tokenizes on whitespace, so merges never cross word boundaries; the vocab comes from the corpus. Training updates pair counts incrementally (only the words that contain the merged pair) and breaks ties by first occurrence, which reproduces the merges of the original full-recount version; encoding applies the lowest-ranked merge first and caches up to 500k words. `cobertura` (0.9999 in prep, 1.0 by default) leaves the rarest chars out of the base vocab. Spaces are their own tokens: on edu_high that gives ~2.5 chars/token and 40% of tokens are spaces. Attaching the space to the next word (GPT-2 style) would shorten sequences, but then the SFT/DPO prompts ending in `"Resposta: "` would no longer tokenize as a prefix of the full text. Special tokens `<PAD> <UNK> <BOS> <EOS>` are always ids 0–3 (`EOS_ID` in `tokenizer.py`). Characters absent from the corpus (`I`, `É` in the synthetic one) become `<UNK>` and vanish when decoding, which is why "Instrução" prints as "nstrução" (not with a `prep` tokenizer).
 - **SFT/DPO targets end in `<EOS>`** so the model learns to stop; generation stops at `<EOS>`. SFT masks the instruction targets but keeps the one that predicts the first response token.
+- **Mixed precision**: on CUDA, pre-training runs under `torch.autocast` in fp16 with a `GradScaler` (T4) or in bf16 without one (compute capability ≥ 8: L4, A100). Weights and optimizer state stay fp32, and so does the residual stream (it starts at the fp32 embedding), so the hand-written LayerNorm never sees fp16. `--no-amp` trains in fp32; `log_treino.json` records `precisao`. SFT, DPO and generation always run in fp32.
 - **Model uses weight tying** (`lm_head.weight` is `token_embedding.weight`) and **pre-norm** blocks.
 - **Checkpoint keys**: `modelo`, `config` (a pickled `GPTConfig`, hence `weights_only=False`), `epoch`, `loss`, plus `val_loss`, `total_tokens`, `tempo_total_seg` for pre-training or `tipo` (`sft`/`dpo`) for fine-tuning.
 

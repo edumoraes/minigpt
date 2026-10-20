@@ -12,6 +12,7 @@ EXPANDIDO com:
 import json
 import math
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -159,9 +160,32 @@ def get_lr(it: int, config: GPTConfig, total_passos: int) -> float:
     return config.min_lr + coeff * (config.learning_rate - config.min_lr)
 
 
+def dtype_amp(config: GPTConfig, device: str) -> torch.dtype | None:
+    """
+    Tipo de 16 bits da precisão mista, ou None pra treinar em fp32.
+
+    A T4 tem tensor cores pra fp16, mas não pra bf16. A partir da Ampere
+    (A100, L4) o bf16 é melhor: tem o mesmo alcance do fp32, então os
+    gradientes não somem e o GradScaler não é necessário.
+    """
+    if device != "cuda" or not config.use_amp:
+        return None
+    return torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
+
+def autocast(amp: torch.dtype | None):
+    """
+    Roda o bloco em precisão mista: as camadas Linear e a atenção calculam
+    em 16 bits, e a cross entropy continua em fp32. O fluxo residual também
+    fica em fp32 (começa no embedding, e fp32 + fp16 dá fp32), então o
+    LayerNorm calcula média e variância em fp32. Sem dtype, não muda nada.
+    """
+    return torch.autocast("cuda", dtype=amp) if amp else nullcontext()
+
+
 @torch.no_grad()
 def avaliar(
-    modelo: GPTModel, dataloader: DataLoader, device: str
+    modelo: GPTModel, dataloader: DataLoader, device: str, amp: torch.dtype | None = None
 ) -> float:
     """Avalia o modelo no dataset de validação. Retorna a loss média."""
     modelo.eval()
@@ -169,7 +193,8 @@ def avaliar(
     n_batches = 0
     for x, y in dataloader:
         x, y = x.to(device), y.to(device)
-        _, loss = modelo(x, y)
+        with autocast(amp):
+            _, loss = modelo(x, y)
         if loss is not None:
             total_loss += loss.item()
             n_batches += 1
@@ -260,6 +285,27 @@ def treinar(
         betas=(config.beta1, config.beta2),
     )
 
+    # ── Precisão mista ──
+    # Em fp16, gradientes pequenos viram zero. O GradScaler multiplica a loss
+    # antes do backward e desfaz a escala antes do clipping; se aparecer inf,
+    # pula o passo e diminui a escala. Desligado (bf16 ou fp32), não faz nada.
+    amp = dtype_amp(config, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp == torch.float16)
+    precisao = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(amp, "fp32")
+    print(f"  Precisão: {precisao}")
+
+    def passo_otimizador() -> None:
+        nonlocal step_global
+        lr = get_lr(step_global, config, total_passos)
+        for param_group in otimizador.param_groups:
+            param_group["lr"] = lr
+        scaler.unscale_(otimizador)
+        torch.nn.utils.clip_grad_norm_(modelo.parameters(), config.max_grad_norm)
+        scaler.step(otimizador)
+        scaler.update()
+        otimizador.zero_grad(set_to_none=True)
+        step_global += 1
+
     # ── Loop de treino ──
     modelo.train()
     step_global = 0
@@ -289,11 +335,12 @@ def treinar(
             x, y = x.to(device), y.to(device)
 
             # Forward
-            logits, loss = modelo(x, y)
+            with autocast(amp):
+                logits, loss = modelo(x, y)
 
             # Normalizar loss pelo accumulation steps
             loss_norm = loss / config.gradient_accum_steps
-            loss_norm.backward()
+            scaler.scale(loss_norm).backward()
 
             accum_count += 1
             epoca_loss += loss.item()
@@ -316,28 +363,11 @@ def treinar(
 
             # Backward + update a cada gradient_accum_steps
             if accum_count % config.gradient_accum_steps == 0:
-                lr = get_lr(step_global, config, total_passos)
-                for param_group in otimizador.param_groups:
-                    param_group["lr"] = lr
-
-                torch.nn.utils.clip_grad_norm_(
-                    modelo.parameters(), config.max_grad_norm
-                )
-                otimizador.step()
-                otimizador.zero_grad(set_to_none=True)
-                step_global += 1
+                passo_otimizador()
 
         # Remanescente de accumulation
         if accum_count % config.gradient_accum_steps != 0:
-            lr = get_lr(step_global, config, total_passos)
-            for param_group in otimizador.param_groups:
-                param_group["lr"] = lr
-            torch.nn.utils.clip_grad_norm_(
-                modelo.parameters(), config.max_grad_norm
-            )
-            otimizador.step()
-            otimizador.zero_grad(set_to_none=True)
-            step_global += 1
+            passo_otimizador()
 
         media_loss = epoca_loss / max(n_batches, 1)
         elapsed = time.time() - t0
@@ -349,7 +379,7 @@ def treinar(
         val_str = ""
         val_loss = None
         if val_loader:
-            val_loss = avaliar(modelo, val_loader, device)
+            val_loss = avaliar(modelo, val_loader, device, amp)
             val_str = f" │ Val Loss: {val_loss:.4f}"
 
         print(
@@ -446,6 +476,7 @@ def treinar(
             "vocab_size": config.vocab_size,
             "tokenizer_type": config.tokenizer_type,
             "use_rope": config.use_rope,
+            "precisao": precisao,
         },
         "device": device,
         "n_params": modelo.contar_parametros(),

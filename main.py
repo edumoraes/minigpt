@@ -132,6 +132,8 @@ def cmd_train(args):
         config.tokenizer_type = args.tokenizer
     if args.no_rope:
         config.use_rope = False
+    if args.no_amp:
+        config.use_amp = False
 
     print(f"\nConfiguração:")
     print(f"  d_model={config.d_model}, n_heads={config.n_heads}, "
@@ -446,6 +448,7 @@ Exemplos:
     p_train.add_argument("--accum", type=int, help="Gradient accumulation steps")
     p_train.add_argument("--tokenizer", type=str, choices=["bpe", "char"], help="Tipo de tokenizer")
     p_train.add_argument("--no-rope", action="store_true", help="Desativar RoPE")
+    p_train.add_argument("--no-amp", action="store_true", help="Treinar em fp32 também na GPU")
 
     # ── sft ──
     p_sft = subparsers.add_parser("sft", help="Supervised Fine-Tuning")

@@ -61,6 +61,11 @@ class GPTConfig:
     # Generaliza melhor para sequências mais longas.
     use_rope: bool = True
 
+    # --- NOVO: Precisão mista (só no pré-treino em GPU CUDA) ---
+    # Forward e backward em 16 bits: fp16 na T4, bf16 a partir da Ampere.
+    # Os pesos e o estado do otimizador continuam em fp32.
+    use_amp: bool = True
+
     # --- NOVO: Beam search ---
     # beam_width=1 desativado (decodificação greedy/sample normal)
     beam_width: int = 1
