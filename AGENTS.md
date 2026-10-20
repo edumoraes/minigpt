@@ -26,9 +26,11 @@ python colab_train.py --cpu --etapas "train --epochs 1"   # cheap smoke test
 python colab_train.py --manter                            # keep the VM: colab console -s minigpt
 ```
 
-`colab_train.py` (stdlib only) packs the working tree (tracked + untracked-but-not-ignored files, uncommitted changes included), uploads it to a new VM, runs the stages in the background while polling `treino.log`, downloads `output/` into the local `output/` (previous files go to `output/anterior-<date>/`), and stops the VM on success, on error and on Ctrl+C. It refuses to start if a session with the same name exists, since `colab new` would orphan it. A VM spends compute units while it is on: check `colab usage` and `colab sessions`.
+`colab_train.py` (stdlib only) packs the working tree (tracked + untracked-but-not-ignored files, uncommitted changes included), uploads it to a new VM, runs the stages there while polling `treino.log` through `colab download`, downloads `output/` into the local `output/` (previous files go to `output/anterior-<date>/`), and stops the VM on success, on error, on Ctrl+C and on kill or a closed terminal. It refuses to start if a session with the same name exists, since `colab new` would orphan it. A VM spends compute units while it is on: check `colab usage` and `colab sessions`.
 
-Cost: an epoch covers every sliding window of `context_len` tokens over ~413k tokens (the train split plus two augmented copies), ~12.9k batches at batch_size 32. That can take several minutes per epoch on a T4; `train` prints throughput and an upper-bound ETA every 30 s.
+Everything on the VM runs inside its first `colab exec`. A later exec reattaches to the existing kernel, and on far-away T4s (europe-west4, asia-southeast1) that reattach hung twice with colab CLI 0.7.4: the websocket took ~20 s and the code was never sent. Don't split the work into several execs.
+
+Cost: an epoch covers every sliding window of `context_len` tokens over ~413k tokens (the train split plus two augmented copies), ~12.9k batches at batch_size 32. On a T4 (~590k tokens/s, 1.07 compute units/hour in Oct 2026) that is ~3 min per epoch: `--etapas "train --epochs 3" sft dpo sample` took 10.6 min, and the default 30 epochs would take ~1.5 h. `train` prints throughput and an upper-bound ETA every 30 s.
 
 ## Dependencies
 
