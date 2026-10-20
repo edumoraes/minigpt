@@ -189,11 +189,11 @@
 
   const $ = (id) => document.getElementById(id);
   const repo = document.documentElement.dataset.modelo;
-  // ?modelo=<url> troca a origem dos pesos (ex.: uma pasta local nos testes)
-  const base = new URL(
-    new URLSearchParams(location.search).get("modelo") ?? `https://huggingface.co/${repo}/resolve/main`,
-    location.href,
-  ).href;
+  // ?modelo=<url> troca a origem dos pesos, mas só em localhost (testes com uma pasta local):
+  // no Space publicado, um link com ele faria a página gerar o texto de outro modelo
+  const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+  const origem = (local && new URLSearchParams(location.search).get("modelo")) || `https://huggingface.co/${repo}/resolve/main`;
+  const base = new URL(origem, location.href).href;
   $("link-modelo").href = `https://huggingface.co/${repo}`;
 
   const numero = (valor, casas = 1) => valor.toLocaleString("pt-BR", { maximumFractionDigits: casas, minimumFractionDigits: casas });
